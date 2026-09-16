@@ -1,0 +1,36 @@
+name: Community guard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: services/lec-doc
+      - uses: actions/checkout@v4
+        with:
+          repository: lec-org/lec-doc-editor
+          ref: v0.96.0-lec.1
+          path: packages/lec-doc-editor
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable && corepack prepare pnpm@11.25.0 --activate
+      - name: Reject proprietary and product-brand artifacts
+        working-directory: services/lec-doc
+        shell: bash
+        run: |
+          test ! -f .gitmodules
+          test ! -e src/ee
+          test ! -e packages/ee
+          test ! -e packages/base-formula
+          ! grep -R -E '(@/ee|@docmost/ee|Powered by Docmost|docmost-logo|docmost-favicon)' --exclude-dir=.git --exclude-dir=node_modules --exclude=PROVENANCE.md --exclude=pnpm-lock.yaml .
+          test -s LICENSE
+          test -s PROVENANCE.md
+      - run: pnpm --dir packages/lec-doc-editor install --frozen-lockfile && pnpm --dir packages/lec-doc-editor build
+      - run: pnpm --dir services/lec-doc install --frozen-lockfile
+      - run: pnpm --dir services/lec-doc build
