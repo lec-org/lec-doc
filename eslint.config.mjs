@@ -22,6 +22,8 @@ export default [
       },
     },
     rules: {
+      // 当前输出为 CommonJS；允许类型安全的 TS import = require，仍禁止裸 require。
+      '@typescript-eslint/no-require-imports': ['error', { allowAsImport: true }],
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': 'off',
       '@typescript-eslint/ban-ts-comment': 'off',

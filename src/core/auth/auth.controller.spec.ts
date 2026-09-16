@@ -7,7 +7,10 @@ describe('AuthController', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
-    }).compile();
+    })
+      // 构造器冒烟测试隔离外部依赖；业务和权限行为由各自用例验证。
+      .useMocker(() => ({}))
+      .compile();
 
     controller = module.get<AuthController>(AuthController);
   });

@@ -14,23 +14,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: lec-org/lec-doc-editor
-          ref: v0.96.0-lec.1
+          ref: 9c08bd2f7194f7a59b0b0db28cae9ddd5b766a24
           path: packages/lec-doc-editor
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - run: corepack enable && corepack prepare pnpm@11.25.0 --activate
-      - name: Reject proprietary and product-brand artifacts
-        working-directory: services/lec-doc
-        shell: bash
-        run: |
-          test ! -f .gitmodules
-          test ! -e src/ee
-          test ! -e packages/ee
-          test ! -e packages/base-formula
-          ! grep -R -E '(@/ee|@docmost/ee|Powered by Docmost|docmost-logo|docmost-favicon)' --exclude-dir=.git --exclude-dir=node_modules --exclude=PROVENANCE.md --exclude=pnpm-lock.yaml .
-          test -s LICENSE
-          test -s PROVENANCE.md
+      - run: node packages/lec-doc-editor/scripts/community-guard.mjs services/lec-doc
       - run: pnpm --dir packages/lec-doc-editor install --frozen-lockfile && pnpm --dir packages/lec-doc-editor build
       - run: pnpm --dir services/lec-doc install --frozen-lockfile
-      - run: pnpm --dir services/lec-doc build
+      - run: pnpm --dir services/lec-doc build && pnpm --dir services/lec-doc test --runInBand && pnpm --dir services/lec-doc lint
+      - run: pnpm --dir services/lec-doc check:community
