@@ -9,6 +9,7 @@ import { CollaborationModule } from '../../collaboration/collaboration.module';
 import { WatcherModule } from '../watcher/watcher.module';
 import { TransclusionModule } from './transclusion/transclusion.module';
 import { LabelModule } from '../label/label.module';
+import { LecAuthorizationModule } from '../lec-authorization/lec-authorization.module';
 
 @Module({
   controllers: [PageController],
@@ -25,6 +26,7 @@ import { LabelModule } from '../label/label.module';
     WatcherModule,
     TransclusionModule,
     LabelModule,
+    LecAuthorizationModule,
   ],
 })
 export class PageModule {}

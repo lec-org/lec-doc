@@ -7,11 +7,11 @@ import { SignupService } from './services/signup.service';
 import { TokenModule } from './token.module';
 import { LecOidcClient } from './lec-oidc.client';
 import { LecOidcTransactions } from './lec-oidc-transactions';
-import { LecIdentityService } from './lec-identity.service';
+import { LecIdentityModule } from './lec-identity.module';
 import { LecOidcController } from './lec-oidc.controller';
 
 @Module({
-  imports: [TokenModule, WorkspaceModule],
+  imports: [TokenModule, WorkspaceModule, LecIdentityModule],
   controllers: [AuthController, LecOidcController],
   providers: [
     AuthService,
@@ -19,7 +19,6 @@ import { LecOidcController } from './lec-oidc.controller';
     JwtStrategy,
     LecOidcClient,
     LecOidcTransactions,
-    LecIdentityService,
   ],
   exports: [SignupService],
 })

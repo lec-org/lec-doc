@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB, KyselyTransaction } from '../../types/kysely.types';
-import { dbOrTx, executeTx } from '../../utils';
+import { dbOrTx } from '../../utils';
 import {
   InsertablePage,
   Page,
@@ -180,6 +180,7 @@ export class PageRepo {
   async insertPage(
     insertablePage: InsertablePage,
     trx?: KyselyTransaction,
+    emitCreated: boolean = true,
   ): Promise<Page> {
     const db = dbOrTx(this.db, trx);
     const result = await db
@@ -188,10 +189,12 @@ export class PageRepo {
       .returning(this.baseFields)
       .executeTakeFirst();
 
-    this.eventEmitter.emit(EventName.PAGE_CREATED, {
-      pageIds: [result.id],
-      workspaceId: result.workspaceId,
-    });
+    if (emitCreated) {
+      this.eventEmitter.emit(EventName.PAGE_CREATED, {
+        pageIds: [result.id],
+        workspaceId: result.workspaceId,
+      });
+    }
 
     return result;
   }
@@ -206,122 +209,6 @@ export class PageRepo {
     }
 
     await query.execute();
-  }
-
-  async removePage(
-    pageId: string,
-    deletedById: string,
-    workspaceId: string,
-  ): Promise<void> {
-    const currentDate = new Date();
-
-    const descendants = await this.db
-      .withRecursive('page_descendants', (db) =>
-        db
-          .selectFrom('pages')
-          .select(['id'])
-          .where('id', '=', pageId)
-          .where('deletedAt', 'is', null)
-          .unionAll((exp) =>
-            exp
-              .selectFrom('pages as p')
-              .select(['p.id'])
-              .innerJoin('page_descendants as pd', 'pd.id', 'p.parentPageId')
-              .where('p.deletedAt', 'is', null),
-          ),
-      )
-      .selectFrom('page_descendants')
-      .selectAll()
-      .execute();
-
-    const pageIds = descendants.map((d) => d.id);
-
-    if (pageIds.length > 0) {
-      await executeTx(this.db, async (trx) => {
-        await trx
-          .updateTable('pages')
-          .set({
-            deletedById: deletedById,
-            deletedAt: currentDate,
-          })
-          .where('id', 'in', pageIds)
-          .where('deletedAt', 'is', null)
-          .execute();
-
-        await trx.deleteFrom('shares').where('pageId', 'in', pageIds).execute();
-      });
-
-      this.eventEmitter.emit(EventName.PAGE_SOFT_DELETED, {
-        pageIds: pageIds,
-        workspaceId,
-      });
-    }
-  }
-
-  async restorePage(pageId: string, workspaceId: string): Promise<void> {
-    // First, check if the page being restored has a deleted parent
-    const pageToRestore = await this.db
-      .selectFrom('pages')
-      .select(['id', 'parentPageId'])
-      .where('id', '=', pageId)
-      .executeTakeFirst();
-
-    if (!pageToRestore) {
-      return;
-    }
-
-    // Check if the parent is also deleted
-    let shouldDetachFromParent = false;
-    if (pageToRestore.parentPageId) {
-      const parent = await this.db
-        .selectFrom('pages')
-        .select(['id', 'deletedAt'])
-        .where('id', '=', pageToRestore.parentPageId)
-        .executeTakeFirst();
-
-      // If parent is deleted, we should detach this page from it
-      shouldDetachFromParent = parent?.deletedAt !== null;
-    }
-
-    // Find all descendants to restore
-    const pages = await this.db
-      .withRecursive('page_descendants', (db) =>
-        db
-          .selectFrom('pages')
-          .select(['id'])
-          .where('id', '=', pageId)
-          .unionAll((exp) =>
-            exp
-              .selectFrom('pages as p')
-              .select(['p.id'])
-              .innerJoin('page_descendants as pd', 'pd.id', 'p.parentPageId'),
-          ),
-      )
-      .selectFrom('page_descendants')
-      .selectAll()
-      .execute();
-
-    const pageIds = pages.map((p) => p.id);
-
-    // Restore all pages, but only detach the root page if its parent is deleted
-    await this.db
-      .updateTable('pages')
-      .set({ deletedById: null, deletedAt: null })
-      .where('id', 'in', pageIds)
-      .execute();
-
-    // If we need to detach the restored page from its deleted parent
-    if (shouldDetachFromParent) {
-      await this.db
-        .updateTable('pages')
-        .set({ parentPageId: null })
-        .where('id', '=', pageId)
-        .execute();
-    }
-    this.eventEmitter.emit(EventName.PAGE_RESTORED, {
-      pageIds: pageIds,
-      workspaceId: workspaceId,
-    });
   }
 
   async getRecentPagesInSpace(spaceId: string, pagination: PaginationOptions) {
@@ -505,7 +392,11 @@ export class PageRepo {
 
   async getPageAndDescendants(
     parentPageId: string,
-    opts: { includeContent: boolean; trx?: KyselyTransaction },
+    opts: {
+      includeContent: boolean;
+      includeDeleted?: boolean;
+      trx?: KyselyTransaction;
+    },
   ) {
     return dbOrTx(this.db, opts.trx)
       .withRecursive('page_hierarchy', (db) =>
@@ -525,7 +416,7 @@ export class PageRepo {
           ])
           .$if(opts?.includeContent, (qb) => qb.select('content'))
           .where('id', '=', parentPageId)
-          .where('deletedAt', 'is', null)
+          .$if(!opts.includeDeleted, (qb) => qb.where('deletedAt', 'is', null))
           .unionAll((exp) =>
             exp
               .selectFrom('pages as p')
@@ -543,7 +434,9 @@ export class PageRepo {
               ])
               .$if(opts?.includeContent, (qb) => qb.select('p.content'))
               .innerJoin('page_hierarchy as ph', 'p.parentPageId', 'ph.id')
-              .where('p.deletedAt', 'is', null),
+              .$if(!opts.includeDeleted, (qb) =>
+                qb.where('p.deletedAt', 'is', null),
+              ),
           ),
       )
       .selectFrom('page_hierarchy')

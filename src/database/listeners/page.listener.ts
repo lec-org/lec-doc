@@ -8,6 +8,7 @@ import { Queue } from 'bullmq';
 export class PageEvent {
   pageIds: string[];
   workspaceId: string;
+  operationId?: string;
 }
 
 @Injectable()
@@ -20,8 +21,17 @@ export class PageListener {
 
   @OnEvent(EventName.PAGE_CREATED)
   async handlePageCreated(event: PageEvent) {
-    const { pageIds, workspaceId } = event;
-    await this.aiQueue.add(QueueJob.PAGE_CREATED, { pageIds, workspaceId });
+    const { pageIds, workspaceId, operationId } = event;
+    await this.aiQueue.add(
+      QueueJob.PAGE_CREATED,
+      { pageIds, workspaceId },
+      operationId
+        ? {
+            jobId: `${operationId}-created`,
+            removeOnComplete: { age: 86_400, count: 10_000 },
+          }
+        : {},
+    );
   }
 
   @OnEvent(EventName.PAGE_DELETED)
@@ -32,17 +42,32 @@ export class PageListener {
 
   @OnEvent(EventName.PAGE_SOFT_DELETED)
   async handlePageSoftDeleted(event: PageEvent) {
-    const { pageIds, workspaceId } = event;
+    const { pageIds, workspaceId, operationId } = event;
 
-    await this.aiQueue.add(QueueJob.PAGE_SOFT_DELETED, {
-      pageIds,
-      workspaceId,
-    });
+    await this.aiQueue.add(
+      QueueJob.PAGE_SOFT_DELETED,
+      { pageIds, workspaceId },
+      operationId
+        ? {
+            jobId: `${operationId}-soft-deleted`,
+            removeOnComplete: { age: 86_400, count: 10_000 },
+          }
+        : {},
+    );
   }
 
   @OnEvent(EventName.PAGE_RESTORED)
   async handlePageRestored(event: PageEvent) {
-    const { pageIds, workspaceId } = event;
-    await this.aiQueue.add(QueueJob.PAGE_RESTORED, { pageIds, workspaceId });
+    const { pageIds, workspaceId, operationId } = event;
+    await this.aiQueue.add(
+      QueueJob.PAGE_RESTORED,
+      { pageIds, workspaceId },
+      operationId
+        ? {
+            jobId: `${operationId}-restored`,
+            removeOnComplete: { age: 86_400, count: 10_000 },
+          }
+        : {},
+    );
   }
 }

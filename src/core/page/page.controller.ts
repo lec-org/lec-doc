@@ -53,6 +53,8 @@ import {
   IAuditService,
 } from '../../integrations/audit/audit.service';
 import { getPageTitle } from '../../common/helpers';
+import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
+import { LecResourceLifecycleService } from '../lec-authorization/lec-resource-lifecycle.service';
 
 @UseGuards(JwtAuthGuard)
 @Controller('pages')
@@ -65,6 +67,8 @@ export class PageController {
     private readonly pageAccessService: PageAccessService,
     private readonly backlinkService: BacklinkService,
     private readonly labelService: LabelService,
+    private readonly lecAuthorization: LecAuthorizationService,
+    private readonly lifecycle: LecResourceLifecycleService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
 
@@ -231,11 +235,9 @@ export class PageController {
       }
     }
 
-    const page = await this.pageService.create(
-      user.id,
-      workspace.id,
-      createPageDto,
-    );
+    const principal = await this.lecAuthorization.principal(user, workspace.id);
+    if (principal.type !== 'OIDC') this.lecAuthorization.deny();
+    const page = await this.pageService.create(user, principal, createPageDto);
 
     const { canEdit, hasRestriction } =
       await this.pageAccessService.validateCanViewWithPermissions(page, user);
@@ -347,15 +349,25 @@ export class PageController {
         },
       });
     } else {
-      // User with edit permission can delete
-      await this.pageAccessService.validateCanEdit(page, user);
-
-      await this.pageService.removePage(
-        deletePageDto.pageId,
-        user.id,
-        workspace.id,
+      const pages = await this.pageRepo.getPageAndDescendants(page.id, {
+        includeContent: false,
+      });
+      const decisions = await this.lecAuthorization.requireTree(
+        pages,
+        user,
+        'DELETE',
       );
-
+      const principal = await this.lecAuthorization.principal(user, workspace.id);
+      if (principal.type !== 'OIDC') this.lecAuthorization.deny();
+      await this.lifecycle.deleteTree(
+        user,
+        principal,
+        page.id,
+        decisions.map((decision) => ({
+          id: decision.resource_id,
+          resourceVersion: decision.resource_version,
+        })),
+      );
       this.auditService.log({
         event: AuditEvent.PAGE_TRASHED,
         resourceType: AuditResource.PAGE,
@@ -386,17 +398,32 @@ export class PageController {
       throw new NotFoundException('Page not found');
     }
 
-    // only users with "can edit" space level permission can restore pages
-    const ability = await this.spaceAbility.createForUser(user, page.spaceId);
-    if (ability.cannot(SpaceCaslAction.Edit, SpaceCaslSubject.Page)) {
-      throw new ForbiddenException();
-    }
-
-    // make sure they have page level access to the page
-    await this.pageAccessService.validateCanEdit(page, user);
-
-    await this.pageRepo.restorePage(pageIdDto.pageId, workspace.id);
-
+    const pages = await this.pageRepo.getPageAndDescendants(page.id, {
+      includeContent: false,
+      includeDeleted: true,
+    });
+    const decisions = await this.lecAuthorization.requireTree(
+      pages,
+      user,
+      'RESTORE',
+      page.id,
+    );
+    const deleteOperation = await this.lifecycle.findDeleteOperation(
+      workspace.id,
+      page.id,
+    );
+    const principal = await this.lecAuthorization.principal(user, workspace.id);
+    if (principal.type !== 'OIDC') this.lecAuthorization.deny();
+    await this.lifecycle.restoreTree(
+      user,
+      principal,
+      page.id,
+      deleteOperation.id,
+      decisions.map((decision) => ({
+        id: decision.resource_id,
+        resourceVersion: decision.resource_version,
+      })),
+    );
     this.auditService.log({
       event: AuditEvent.PAGE_RESTORED,
       resourceType: AuditResource.PAGE,

@@ -7,6 +7,7 @@ import {
   SpaceCaslSubject,
 } from '../../casl/interfaces/space-ability.type';
 import { SpaceRepo } from '@docmost/db/repos/space/space.repo';
+import { LecAuthorizationService } from '../../lec-authorization/lec-authorization.service';
 
 @Injectable()
 export class PageAccessService {
@@ -14,52 +15,17 @@ export class PageAccessService {
     private readonly pagePermissionRepo: PagePermissionRepo,
     private readonly spaceAbility: SpaceAbilityFactory,
     private readonly spaceRepo: SpaceRepo,
+    private readonly lec: LecAuthorizationService,
   ) {}
 
-  /**
-   * Validate user can view page, throws ForbiddenException if not.
-   * If page has restrictions: page-level permission determines access.
-   * If no restrictions: space-level permission determines access.
-   */
-  async validateCanView(page: Page, user: User): Promise<void> {
-    // TODO: cache by pageId and userId.
+  // 本地 Space/CASL/PagePermission 只收紧 Core 已允许的能力，不产生独立 allow。
+  private async localPermissions(page: Page, user: User) {
     const ability = await this.spaceAbility.createForUser(user, page.spaceId);
-
-    // User must be at least a space member
-    if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Page)) {
+    if (!ability.can(SpaceCaslAction.Read, SpaceCaslSubject.Page))
       throw new ForbiddenException();
-    }
-
-    const canAccess = await this.pagePermissionRepo.canUserAccessPage(
-      user.id,
-      page.id,
-    );
-    if (!canAccess) {
-      throw new ForbiddenException();
-    }
-  }
-
-  /**
-   * Validate user can view page AND return effective canEdit permission.
-   * Combines access check + edit permission in a single query pass.
-   */
-  async validateCanViewWithPermissions(
-    page: Page,
-    user: User,
-  ): Promise<{ canEdit: boolean; hasRestriction: boolean }> {
-    const ability = await this.spaceAbility.createForUser(user, page.spaceId);
-
-    if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Page)) {
-      throw new ForbiddenException();
-    }
-
     const { hasAnyRestriction, canAccess, canEdit } =
       await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
-
-    if (hasAnyRestriction && !canAccess) {
-      throw new ForbiddenException();
-    }
-
+    if (hasAnyRestriction && !canAccess) throw new ForbiddenException();
     return {
       canEdit: hasAnyRestriction
         ? canEdit
@@ -68,38 +34,29 @@ export class PageAccessService {
     };
   }
 
-  /**
-   * Validate user can edit page, throws ForbiddenException if not.
-   * If page has restrictions: page-level writer permission determines access.
-   * If no restrictions: space-level edit permission determines access.
-   */
+  async validateCanView(page: Page, user: User): Promise<void> {
+    await this.lec.requirePage(page, user, 'VIEW');
+    await this.localPermissions(page, user);
+  }
+
+  async validateCanViewWithPermissions(
+    page: Page,
+    user: User,
+  ): Promise<{ canEdit: boolean; hasRestriction: boolean }> {
+    const [view, edit] = await this.lec.page(page, user, ['VIEW', 'EDIT']);
+    if (!view?.allowed) this.lec.deny();
+    const local = await this.localPermissions(page, user);
+    return { ...local, canEdit: !!edit?.allowed && local.canEdit };
+  }
+
   async validateCanEdit(
     page: Page,
     user: User,
   ): Promise<{ hasRestriction: boolean }> {
-    const ability = await this.spaceAbility.createForUser(user, page.spaceId);
-
-    // User must be at least a space member
-    if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Page)) {
-      throw new ForbiddenException();
-    }
-
-    const { hasAnyRestriction, canEdit } =
-      await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
-
-    if (hasAnyRestriction) {
-      // Page has restrictions - use page-level permission
-      if (!canEdit) {
-        throw new ForbiddenException();
-      }
-    } else {
-      // No restrictions - use space-level permission
-      if (ability.cannot(SpaceCaslAction.Edit, SpaceCaslSubject.Page)) {
-        throw new ForbiddenException();
-      }
-    }
-
-    return { hasRestriction: hasAnyRestriction };
+    await this.lec.requirePage(page, user, 'EDIT');
+    const local = await this.localPermissions(page, user);
+    if (!local.canEdit) throw new ForbiddenException();
+    return { hasRestriction: local.hasRestriction };
   }
 
   async validateCanComment(
@@ -107,19 +64,13 @@ export class PageAccessService {
     user: User,
     workspaceId: string,
   ): Promise<void> {
-    try {
-      await this.validateCanEdit(page, user);
-      return;
-    } catch {
-      // User cannot edit — check if reader commenting is enabled
-    }
-
-    await this.validateCanView(page, user);
-
+    if (workspaceId !== page?.workspaceId) this.lec.deny();
+    await this.lec.requirePage(page, user, 'COMMENT');
+    const local = await this.localPermissions(page, user);
+    if (local.canEdit) return;
     const space = await this.spaceRepo.findById(page.spaceId, workspaceId);
     const settings = space?.settings as Record<string, any> | null;
-    if (!settings?.comments?.allowViewerComments) {
+    if (!settings?.comments?.allowViewerComments)
       throw new ForbiddenException();
-    }
   }
 }

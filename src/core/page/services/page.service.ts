@@ -56,6 +56,8 @@ import { markdownToHtml } from '@lec/doc-editor';
 import { WatcherService } from '../../watcher/watcher.service';
 import { sql } from 'kysely';
 import { TransclusionService } from '../transclusion/transclusion.service';
+import { LecResourceLifecycleService } from '../../lec-authorization/lec-resource-lifecycle.service';
+import { LecPrincipal } from '../../lec-authorization/lec-policy.types';
 
 @Injectable()
 export class PageService {
@@ -74,6 +76,7 @@ export class PageService {
     private collaborationGateway: CollaborationGateway,
     private readonly watcherService: WatcherService,
     private readonly transclusionService: TransclusionService,
+    private readonly lifecycle: LecResourceLifecycleService,
   ) {}
 
   async findById(
@@ -90,12 +93,13 @@ export class PageService {
   }
 
   async create(
-    userId: string,
-    workspaceId: string,
+    user: User,
+    principal: Extract<LecPrincipal, { type: 'OIDC' }>,
     createPageDto: CreatePageDto,
-    trx?: KyselyTransaction,
     isBase: boolean = false,
   ): Promise<Page> {
+    const userId = user.id;
+    const workspaceId = user.workspaceId;
     let parentPageId = undefined;
 
     // check if parent page exists
@@ -130,48 +134,48 @@ export class PageService {
       ydoc = createYdocFromJson(prosemirrorJson);
     }
 
-    const page = await this.pageRepo.insertPage({
-      slugId: generateSlugId(),
-      title: createPageDto.title,
-      position: await this.nextPagePosition(
-        createPageDto.spaceId,
-        parentPageId,
-      ),
-      icon: createPageDto.icon,
-      parentPageId: parentPageId,
-      spaceId: createPageDto.spaceId,
-      creatorId: userId,
-      workspaceId: workspaceId,
-      lastUpdatedById: userId,
-      isBase,
-      content,
-      textContent,
-      ydoc,
-    }, trx);
-
-    if (trx) {
-      // Add the watcher inside the caller's transaction so the async worker
-      // never inserts against an uncommitted page (FK violation on bases).
-      await this.watcherService.addPageWatchers(
-        [userId],
-        page.id,
-        createPageDto.spaceId,
-        workspaceId,
-        trx,
-      );
-    } else {
-      this.generalQueue
-        .add(QueueJob.ADD_PAGE_WATCHERS, {
-          userIds: [userId],
-          pageId: page.id,
-          spaceId: createPageDto.spaceId,
-          workspaceId,
-        })
-        .catch((err) =>
-          this.logger.warn(`Failed to queue add-page-watchers: ${err.message}`),
+    const pageId = uuid7();
+    const page = await this.lifecycle.createPage(
+      user,
+      principal,
+      pageId,
+      parentPageId ? 'DOCMOST_PAGE' : 'DOCMOST_SPACE',
+      parentPageId ?? createPageDto.spaceId,
+      async (trx) => {
+        const inserted = await this.pageRepo.insertPage(
+          {
+            id: pageId,
+            slugId: generateSlugId(),
+            title: createPageDto.title,
+            position: await this.nextPagePosition(
+              createPageDto.spaceId,
+              parentPageId,
+              trx,
+            ),
+            icon: createPageDto.icon,
+            parentPageId,
+            spaceId: createPageDto.spaceId,
+            creatorId: userId,
+            workspaceId,
+            lastUpdatedById: userId,
+            isBase,
+            content,
+            textContent,
+            ydoc,
+          },
+          trx,
+          false,
         );
-    }
-
+        await this.watcherService.addPageWatchers(
+          [userId],
+          inserted.id,
+          createPageDto.spaceId,
+          workspaceId,
+          trx,
+        );
+        return inserted;
+      },
+    );
     return page;
   }
 
@@ -1095,14 +1099,6 @@ export class PageService {
         workspaceId,
       });
     }
-  }
-
-  async removePage(
-    pageId: string,
-    userId: string,
-    workspaceId: string,
-  ): Promise<void> {
-    await this.pageRepo.removePage(pageId, userId, workspaceId);
   }
 
   private async parseProsemirrorContent(

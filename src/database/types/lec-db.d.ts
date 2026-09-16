@@ -10,6 +10,18 @@ export type Generated<T> =
     ? ColumnType<S, I | undefined, U>
     : ColumnType<T, T | undefined, T>;
 
+export type Json = JsonValue;
+
+export type JsonArray = JsonValue[];
+
+export type JsonObject = {
+  [x: string]: JsonValue | undefined;
+};
+
+export type JsonPrimitive = boolean | number | string | null;
+
+export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
+
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
 export interface LecIdentities {
@@ -20,6 +32,28 @@ export interface LecIdentities {
   workspaceId: string;
 }
 
+export interface LecResourceOperations {
+  action: string;
+  actorIssuer: string;
+  actorSubject: string;
+  actorUserId: string | null;
+  attempts: Generated<number>;
+  availableAt: Generated<Timestamp>;
+  createdAt: Generated<Timestamp>;
+  id: string;
+  lastErrorCode: string | null;
+  leaseUntil: Timestamp | null;
+  payload: Generated<Json>;
+  registrationKey: string | null;
+  resourceId: string;
+  resourceKind: string;
+  sourceOperationId: string | null;
+  status: string;
+  updatedAt: Generated<Timestamp>;
+  workspaceId: string;
+}
+
 export interface DB {
   lecIdentities: LecIdentities;
+  lecResourceOperations: LecResourceOperations;
 }
