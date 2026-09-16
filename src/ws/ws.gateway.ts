@@ -16,7 +16,6 @@ import { getSpaceRoomName, getUserRoomName } from './ws.utils';
 import * as cookie from 'cookie';
 
 @WebSocketGateway({
-  cors: { origin: '*' },
   transports: ['websocket'],
 })
 export class WsGateway

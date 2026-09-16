@@ -112,13 +112,18 @@ export class UserRepo {
   async insertUser(
     insertableUser: InsertableUser,
     trx?: KyselyTransaction,
-    opts?: { pageEditMode?: string },
+    opts?: {
+      pageEditMode?: string;
+      /** 仅供已验证的外部身份创建无密码账号。 */ passwordless?: boolean;
+    },
   ): Promise<User> {
     const user: InsertableUser = {
       name:
         insertableUser.name || insertableUser.email.split('@')[0].toLowerCase(),
       email: insertableUser.email.toLowerCase(),
-      password: await hashPassword(insertableUser.password),
+      password: opts?.passwordless
+        ? null
+        : await hashPassword(insertableUser.password),
       locale: 'en-US',
       role: insertableUser?.role,
       lastLoginAt: new Date(),

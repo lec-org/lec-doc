@@ -7,6 +7,21 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: --health-cmd 'pg_isready -U postgres' --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd 'redis-cli ping' --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+      LEC_DOC_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
+      LEC_DOC_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,5 +38,7 @@ jobs:
       - run: node packages/lec-doc-editor/scripts/community-guard.mjs services/lec-doc
       - run: pnpm --dir packages/lec-doc-editor install --frozen-lockfile && pnpm --dir packages/lec-doc-editor build
       - run: pnpm --dir services/lec-doc install --frozen-lockfile
+      - run: pnpm --dir services/lec-doc migration:latest && pnpm --dir services/lec-doc migration:codegen:lec
+      - run: git -C services/lec-doc diff --exit-code -- src/database/types/lec-db.d.ts
       - run: pnpm --dir services/lec-doc build && pnpm --dir services/lec-doc test --runInBand && pnpm --dir services/lec-doc lint
       - run: pnpm --dir services/lec-doc check:community

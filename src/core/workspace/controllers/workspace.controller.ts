@@ -18,7 +18,6 @@ import { PaginationOptions } from '@docmost/db/pagination/pagination-options';
 import { WorkspaceInvitationService } from '../services/workspace-invitation.service';
 import { Public } from '../../../common/decorators/public.decorator';
 import {
-  AcceptInviteDto,
   InvitationIdDto,
   InviteUserDto,
   RevokeInviteDto,
@@ -290,37 +289,6 @@ export class WorkspaceController {
       revokeInviteDto.invitationId,
       workspace.id,
     );
-  }
-
-  @Public()
-  @HttpCode(HttpStatus.OK)
-  @Post('invites/accept')
-  async acceptInvite(
-    @Body() acceptInviteDto: AcceptInviteDto,
-    @AuthWorkspace() workspace: Workspace,
-    @Res({ passthrough: true }) res: FastifyReply,
-  ) {
-    const result = await this.workspaceInvitationService.acceptInvitation(
-      acceptInviteDto,
-      workspace,
-    );
-
-    if (result.requiresLogin) {
-      return {
-        requiresLogin: true,
-      };
-    }
-
-    res.setCookie('authToken', result.authToken, {
-      httpOnly: true,
-      path: '/',
-      expires: this.environmentService.getCookieExpiresIn(),
-      secure: this.environmentService.isHttps(),
-    });
-
-    return {
-      requiresLogin: false,
-    };
   }
 
   @Public()

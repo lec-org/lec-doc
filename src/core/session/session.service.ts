@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { TokenService } from '../auth/services/token.service';
+import { JwtPayload, JwtType } from '../auth/dto/jwt-payload';
 import { UserSessionRepo } from '@docmost/db/repos/session/user-session.repo';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { User } from '@docmost/db/types/entity.types';
@@ -53,6 +54,32 @@ export class SessionService {
     });
 
     return this.tokenService.generateAccessToken(user, session.id);
+  }
+
+  /** 重新登录先撤销浏览器原会话；撤销失败不能继续签发新会话。 */
+  async rotateSessionAndToken(
+    user: User,
+    previousToken?: string,
+  ): Promise<string> {
+    let previous: JwtPayload | undefined;
+    if (previousToken) {
+      try {
+        previous = await this.tokenService.verifyJwt(
+          previousToken,
+          JwtType.ACCESS,
+        );
+      } catch {
+        // 过期或无效 Cookie 不阻止重新完成 OIDC 登录。
+      }
+    }
+    if (previous?.sessionId) {
+      await this.userSessionRepo.revokeById(
+        previous.sessionId,
+        previous.sub,
+        previous.workspaceId,
+      );
+    }
+    return this.createSessionAndToken(user);
   }
 
   async getActiveSessions(

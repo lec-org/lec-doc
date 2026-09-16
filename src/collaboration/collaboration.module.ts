@@ -16,6 +16,7 @@ import { TransclusionService } from '../core/page/transclusion/transclusion.serv
 import { TransclusionModule } from '../core/page/transclusion/transclusion.module';
 import { StorageModule } from '../integrations/storage/storage.module';
 import { EnvironmentModule } from '../integrations/environment/environment.module';
+import { LecBrowserSecurity } from '../core/auth/lec-browser-security';
 
 @Module({
   providers: [
@@ -46,10 +47,11 @@ export class CollaborationModule implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly collaborationGateway: CollaborationGateway,
     private readonly httpAdapterHost: HttpAdapterHost,
+    private readonly browserSecurity: LecBrowserSecurity,
   ) {}
 
   onModuleInit() {
-    this.collabWsAdapter = new CollabWsAdapter();
+    this.collabWsAdapter = new CollabWsAdapter(this.browserSecurity);
     const httpServer = this.httpAdapterHost.httpAdapter.getHttpServer();
 
     const wss = this.collabWsAdapter.handleUpgrade(this.path, httpServer);

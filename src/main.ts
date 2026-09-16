@@ -13,6 +13,7 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyIp from 'fastify-ip';
 import { InternalLogFilter } from './common/logger/internal-log-filter';
 import { EnvironmentService } from './integrations/environment/environment.service';
+import { LecBrowserSecurity } from './core/auth/lec-browser-security';
 import {
   resolveFrameHeader,
   resolveFrameHeadersForPath,
@@ -56,11 +57,12 @@ async function bootstrap() {
   });
 
   const reflector = app.get(Reflector);
-  const redisIoAdapter = new WsRedisIoAdapter(app);
+  const redisIoAdapter = new WsRedisIoAdapter(app, app.get(LecBrowserSecurity));
   await redisIoAdapter.connectToRedis();
 
   app.useWebSocketAdapter(redisIoAdapter);
 
+  app.get(LecBrowserSecurity).install(app.getHttpAdapter().getInstance());
   await app.register(fastifyIp);
   await app.register(fastifyMultipart);
   await app.register(fastifyCookie);
@@ -157,7 +159,6 @@ async function bootstrap() {
     }),
   );
 
-  app.enableCors();
   app.useGlobalInterceptors(new TransformHttpResponseInterceptor(reflector));
   app.enableShutdownHooks();
 

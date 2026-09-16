@@ -23,12 +23,13 @@
     "migration:reset": "tsx src/database/migrate.ts down-to NO_MIGRATIONS",
     "migration:codegen": "kysely-codegen --dialect=postgres --camel-case --env-file=.env --out-file=./src/database/types/db.d.ts",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\"",
-    "test": "jest",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config test/jest-e2e.json",
-    "check:community": "node node_modules/@lec/doc-editor/scripts/community-guard.mjs"
+    "check:community": "node node_modules/@lec/doc-editor/scripts/community-guard.mjs",
+    "migration:codegen:lec": "kysely-codegen --dialect=postgres --camel-case --include-pattern 'public.lec_*' --out-file=src/database/types/lec-db.d.ts && prettier --write src/database/types/lec-db.d.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1050.0",
@@ -106,6 +107,7 @@
     "nestjs-kysely": "3.1.2",
     "nestjs-pino": "4.6.1",
     "nodemailer": "9.0.1",
+    "openid-client": "6.8.8",
     "p-limit": "7.3.0",
     "passport-jwt": "4.0.1",
     "pg-tsquery": "8.4.2",
@@ -144,10 +146,10 @@
     "@types/mime-types": "^3.0.1",
     "@types/node": "^25.5.0",
     "@types/nodemailer": "^7.0.11",
-    "@types/react": "19.2.17",
-    "@types/react-dom": "19.2.3",
     "@types/passport-google-oauth20": "^2.0.17",
     "@types/passport-jwt": "^4.0.1",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
     "@types/supertest": "^6.0.3",
     "@types/ws": "^8.18.1",
     "@types/yauzl": "^2.10.3",
@@ -158,6 +160,7 @@
     "globals": "^17.4.0",
     "jest": "^30.3.0",
     "kysely-codegen": "^0.20.0",
+    "pg": "8.23.0",
     "prettier": "^3.8.1",
     "source-map-support": "^0.5.21",
     "supertest": "^7.2.2",
@@ -179,7 +182,7 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "happy-dom.+\\.js$": [
+      "(happy-dom|openid-client|oauth4webapi|jose).+\\.js$": [
         "babel-jest",
         {
           "presets": [
@@ -197,7 +200,7 @@
       "^.+\\.(t|j)sx?$": "ts-jest"
     },
     "transformIgnorePatterns": [
-      "/node_modules/(?!(\\.pnpm/)?(nanoid|uuid|image-dimensions|marked|happy-dom)(@|/))"
+      "/node_modules/(?!(\\.pnpm/)?(nanoid|uuid|image-dimensions|marked|happy-dom|openid-client|oauth4webapi|jose)(@|/))"
     ],
     "collectCoverageFrom": [
       "**/*.(t|j)s"

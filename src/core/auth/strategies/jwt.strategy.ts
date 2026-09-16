@@ -8,7 +8,11 @@ import { UserRepo } from '@docmost/db/repos/user/user.repo';
 import { UserSessionRepo } from '@docmost/db/repos/session/user-session.repo';
 import { SessionActivityService } from '../../session/session-activity.service';
 import { FastifyRequest } from 'fastify';
-import { extractBearerTokenFromHeader, isUserDisabled } from '../../../common/helpers';
+import {
+  extractBearerTokenFromHeader,
+  isUserDisabled,
+} from '../../../common/helpers';
+import { LecIdentityService } from '../lec-identity.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -18,6 +22,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     private userSessionRepo: UserSessionRepo,
     private sessionActivityService: SessionActivityService,
     private readonly environmentService: EnvironmentService,
+    private readonly identities: LecIdentityService,
   ) {
     super({
       jwtFromRequest: (req: FastifyRequest) => {
@@ -30,7 +35,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(req: any, payload: JwtPayload) {
-    if (!payload.workspaceId) {
+    if (!payload.workspaceId || !payload.sessionId) {
       throw new UnauthorizedException();
     }
 
@@ -44,7 +49,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     const workspace = await this.workspaceRepo.findById(payload.workspaceId);
 
-    if (!workspace) {
+    if (!workspace || workspace.deletedAt) {
       throw new UnauthorizedException();
     }
     const user = await this.userRepo.findById(payload.sub, payload.workspaceId);
@@ -53,17 +58,29 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException();
     }
 
-    if ((payload as JwtPayload).sessionId) {
-      const sessionId = (payload as JwtPayload).sessionId;
-      const session = await this.userSessionRepo.findActiveById(sessionId);
-      if (!session || session.userId !== payload.sub || session.workspaceId !== payload.workspaceId) {
-        throw new UnauthorizedException();
-      }
-      req.raw.sessionId = sessionId;
-      this.sessionActivityService.trackActivity(sessionId, payload.sub, payload.workspaceId);
+    const sessionId = payload.sessionId;
+    const session = await this.userSessionRepo.findActiveById(sessionId);
+    if (
+      !session ||
+      session.userId !== payload.sub ||
+      session.workspaceId !== payload.workspaceId
+    ) {
+      throw new UnauthorizedException();
     }
+    req.raw.sessionId = sessionId;
+    const identity = await this.identities.findByUserId(user.id, workspace.id);
+    if (!identity) throw new UnauthorizedException();
+    this.sessionActivityService.trackActivity(
+      sessionId,
+      payload.sub,
+      payload.workspaceId,
+    );
 
-    return { user, workspace, authType: JwtType.ACCESS };
+    return {
+      user,
+      workspace,
+      authType: JwtType.ACCESS,
+      principal: { type: 'OIDC', ...identity },
+    };
   }
-
 }

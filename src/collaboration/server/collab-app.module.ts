@@ -16,12 +16,14 @@ import { CaslModule } from '../../core/casl/casl.module';
 import { CacheModule } from '@nestjs/cache-manager';
 import KeyvRedis, { defaultReconnectStrategy } from '@keyv/redis';
 import { parseRedisUrl } from '../../common/helpers';
+import { SecurityModule } from '../../integrations/security/security.module';
 
 @Module({
   imports: [
     LoggerModule,
     DatabaseModule,
     EnvironmentModule,
+    SecurityModule,
     CaslModule,
     CollaborationModule,
     QueueModule,

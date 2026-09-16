@@ -1,9 +1,10 @@
 import { WebSocketServer } from 'ws';
+import { LecBrowserSecurity } from '../../core/auth/lec-browser-security';
 
 export class CollabWsAdapter {
   private readonly wss: WebSocketServer;
 
-  constructor() {
+  constructor(private readonly security: LecBrowserSecurity) {
     this.wss = new WebSocketServer({ noServer: true });
   }
 
@@ -14,6 +15,14 @@ export class CollabWsAdapter {
         const pathname = new URL(request.url, baseUrl).pathname;
 
         if (pathname === path) {
+          try {
+            this.security.assertOrigin(request.headers.origin, true);
+          } catch {
+            socket.end(
+              'HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+            );
+            return;
+          }
           this.wss.handleUpgrade(request, socket, head, (ws) => {
             this.wss.emit('connection', ws, request);
           });
@@ -22,8 +31,10 @@ export class CollabWsAdapter {
         } else {
           socket.destroy();
         }
-      } catch (err) {
-        socket.end('HTTP/1.1 400\r\n' + (err as Error).message);
+      } catch {
+        socket.end(
+          'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n',
+        );
       }
     });
 
