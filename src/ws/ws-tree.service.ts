@@ -7,22 +7,27 @@ export class WsTreeService {
   constructor(private readonly wsService: WsService) {}
 
   async notifyPageRestricted(page: Page, excludeUserId: string): Promise<void> {
-    await this.wsService.emitToSpaceExceptUsers(page.spaceId, [excludeUserId], {
-      operation: 'deleteTreeNode',
-      spaceId: page.spaceId,
-      payload: {
-        node: {
-          id: page.id,
-          slugId: page.slugId,
+    await this.wsService.emitToSpaceExceptUsers(
+      page.spaceId,
+      [excludeUserId],
+      page.id,
+      {
+        operation: 'deleteTreeNode',
+        spaceId: page.spaceId,
+        payload: {
+          node: {
+            id: page.id,
+            slugId: page.slugId,
+          },
         },
       },
-    });
+    );
   }
 
   async notifyPermissionGranted(page: Page, userIds: string[]): Promise<void> {
     if (userIds.length === 0) return;
 
-    await this.wsService.emitToUsers(userIds, {
+    await this.wsService.emitToUsers(userIds, page.id, {
       operation: 'addTreeNode',
       spaceId: page.spaceId,
       payload: {

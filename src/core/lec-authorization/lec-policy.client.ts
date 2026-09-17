@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { fetch } from 'undici';
 import { z } from 'zod';
 import { OutboundAgentFactory } from '../../integrations/outbound/outbound-agent.factory';
+import { loadInternalCa } from '../../integrations/outbound/internal-ca';
 import {
   batchResponseSchema,
   LecDecision,
@@ -38,14 +39,21 @@ export type LecCorePath =
   | 'doc-control/request-access'
   | 'doc-control/review-access'
   | 'doc-control/revoke-access'
-  | 'doc-control/save-group';
+  | 'doc-control/save-group'
+  | 'doc-control/reparent';
 
 @Injectable()
 export class LecPolicyClient {
+  private readonly caCert: string;
+
   constructor(
     private readonly config: ConfigService,
     private readonly agents: OutboundAgentFactory,
-  ) {}
+  ) {
+    this.caCert = loadInternalCa(
+      this.config.getOrThrow<string>('LEC_INTERNAL_CA_FILE'),
+    );
+  }
 
   /** 每次调用重新联网；唯一去重范围是本次 batch，不缓存正授权。 */
   async authorize(
@@ -124,7 +132,7 @@ export class LecPolicyClient {
       )
         throw new Error('Core origin invalid');
       if (
-        !/^doc-(authorize-batch|spaces\/bind|resources\/(reserve|activate|cancel)|trees\/(delete|restore|reactivate|cancel-restore)|control\/(classify|transfer-owner|grant|revoke-grant|request-access|review-access|revoke-access|save-group))$/.test(
+        !/^doc-(authorize-batch|spaces\/bind|resources\/(reserve|activate|cancel)|trees\/(delete|restore|reactivate|cancel-restore)|control\/(classify|transfer-owner|grant|revoke-grant|request-access|review-access|revoke-access|save-group|reparent))$/.test(
           path,
         )
       )
@@ -143,7 +151,7 @@ export class LecPolicyClient {
       });
       const request = (async () => {
         const url = `${origin.origin}/api/v1/internal/${path}`;
-        const lease = await this.agents.lease(url);
+        const lease = await this.agents.lease(url, { caCert: this.caCert });
         try {
           abort.signal.throwIfAborted();
           const response = await fetch(url, {

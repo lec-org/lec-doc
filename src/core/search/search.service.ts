@@ -8,9 +8,9 @@ import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
 import { ShareRepo } from '@docmost/db/repos/share/share.repo';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const tsquery = require('pg-tsquery')();
+import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
+import { User } from '@docmost/db/types/entity.types';
+import { htmlEscape } from '../../common/helpers/html-escaper';
 
 @Injectable()
 export class SearchService {
@@ -20,12 +20,13 @@ export class SearchService {
     private shareRepo: ShareRepo,
     private spaceMemberRepo: SpaceMemberRepo,
     private pagePermissionRepo: PagePermissionRepo,
+    private lecAuthorization: LecAuthorizationService,
   ) {}
 
   async searchPage(
     searchParams: SearchDTO,
     opts: {
-      userId?: string;
+      user?: User;
       workspaceId: string;
       publicPageIds?: string[];
     },
@@ -40,54 +41,46 @@ export class SearchService {
     if (query.length < 1 && !browseByFilters) {
       return { items: [] };
     }
-    const searchQuery = tsquery(query + '*');
     const titleOnly = searchParams.titleOnly === true;
-    const titleQuery = query;
-    // escape LIKE wildcards; ranking keeps the raw query
     const titleLikeQuery = query.replace(/[\\%_]/g, '\\$&');
-
+    const normalizedQuery = sql<string>`lower(f_unaccent(${query}))`;
+    const normalizedTitle = sql<string>`lower(coalesce(pages.title, ''))`;
+    const normalizedText = sql<string>`lower(lec_search_unaccent(substring(coalesce(pages.text_content, ''), 1, 1000000)))`;
     const rankColumn = browseByFilters
       ? sql<number>`0`.as('rank')
       : titleOnly
-        ? sql<number>`word_similarity(lower(${titleQuery}), lower(pages.title))`.as(
+        ? sql<number>`word_similarity(${normalizedQuery}, ${normalizedTitle})`.as(
             'rank',
           )
-        : sql<number>`ts_rank(tsv, to_tsquery('english', f_unaccent(${searchQuery})))`.as(
+        : sql<number>`greatest(word_similarity(${normalizedQuery}, ${normalizedTitle}), word_similarity(${normalizedQuery}, ${normalizedText}))`.as(
             'rank',
           );
-    const highlightColumn = browseByFilters || titleOnly
-      ? sql<string>`''`.as('highlight')
-      : sql<string>`ts_headline('english', text_content, to_tsquery('english', f_unaccent(${searchQuery})),'MinWords=9, MaxWords=10, MaxFragments=3')`.as(
-          'highlight',
-        );
 
     let queryResults = this.db
       .selectFrom('pages')
-      .select([
-        'id',
-        'slugId',
-        'title',
-        'icon',
-        'parentPageId',
-        'creatorId',
-        'createdAt',
-        'updatedAt',
-        rankColumn,
-        highlightColumn,
-      ])
+      .select(['id', 'workspaceId', rankColumn])
       .$if(!browseByFilters && !titleOnly, (qb) =>
-        qb.where(
-          'tsv',
-          '@@',
-          sql<string>`to_tsquery('english', f_unaccent(${searchQuery}))`,
+        qb.where((eb) =>
+          eb.or([
+            eb(
+              normalizedTitle,
+              'like',
+              sql<string>`lower(f_unaccent(${`%${titleLikeQuery}%`}))`,
+            ),
+            eb(
+              normalizedText,
+              'like',
+              sql<string>`lower(f_unaccent(${`%${titleLikeQuery}%`}))`,
+            ),
+          ]),
         ),
       )
       .$if(!browseByFilters && titleOnly, (qb) =>
         qb.where((eb) =>
           eb(
-            sql`lower(pages.title)`,
+            normalizedTitle,
             'like',
-            sql`lower(${`%${titleLikeQuery}%`})`,
+            sql<string>`lower(f_unaccent(${`%${titleLikeQuery}%`}))`,
           ),
         ),
       )
@@ -107,25 +100,20 @@ export class SearchService {
       .where('deletedAt', 'is', null)
       .$if(browseByFilters, (qb) => qb.orderBy('updatedAt', 'desc'))
       .$if(!browseByFilters, (qb) => qb.orderBy('rank', 'desc'))
-      .limit(searchParams.limit || 25)
-      .offset(searchParams.offset || 0);
+      .orderBy('id', 'desc');
 
-    if (!searchParams.shareId && !opts.publicPageIds) {
-      queryResults = queryResults.select((eb) => this.pageRepo.withSpace(eb));
-    }
-
-    if (searchParams.spaceId && opts.userId) {
+    if (searchParams.spaceId && opts.user) {
       queryResults = queryResults.where('spaceId', '=', searchParams.spaceId);
-    } else if (opts.userId && !searchParams.spaceId) {
+    } else if (opts.user && !searchParams.spaceId) {
       // only search spaces the user is a member of
       queryResults = queryResults
         .where(
           'spaceId',
           'in',
-          this.spaceMemberRepo.getUserSpaceIdsQuery(opts.userId),
+          this.spaceMemberRepo.getUserSpaceIdsQuery(opts.user.id),
         )
         .where('workspaceId', '=', opts.workspaceId);
-    } else if (opts.publicPageIds && !opts.userId) {
+    } else if (opts.publicPageIds && !opts.user) {
       // Public space search: the allowed id set is computed from live DB
       // state by the controller on every request.
       if (opts.publicPageIds.length === 0) {
@@ -134,7 +122,7 @@ export class SearchService {
       queryResults = queryResults
         .where('id', 'in', opts.publicPageIds)
         .where('workspaceId', '=', opts.workspaceId);
-    } else if (searchParams.shareId && !searchParams.spaceId && !opts.userId) {
+    } else if (searchParams.shareId && !searchParams.spaceId && !opts.user) {
       // search in shares
       const shareId = searchParams.shareId;
       const share = await this.shareRepo.findById(shareId);
@@ -142,20 +130,22 @@ export class SearchService {
         return { items: [] };
       }
 
-      const isRestricted =
-        await this.pagePermissionRepo.hasRestrictedAncestor(share.pageId);
+      const isRestricted = await this.pagePermissionRepo.hasRestrictedAncestor(
+        share.pageId,
+      );
       if (isRestricted) {
         return { items: [] };
       }
 
       const pageIdsToSearch = [];
       if (share.includeSubPages) {
-        const pageList = await this.pageRepo.getPageAndDescendantsExcludingRestricted(
-          share.pageId,
-          {
-            includeContent: false,
-          },
-        );
+        const pageList =
+          await this.pageRepo.getPageAndDescendantsExcludingRestricted(
+            share.pageId,
+            {
+              includeContent: false,
+            },
+          );
 
         pageIdsToSearch.push(...pageList.map((page) => page.id));
       } else {
@@ -173,43 +163,88 @@ export class SearchService {
       return { items: [] };
     }
 
-    //@ts-ignore
-    let results: any[] = await queryResults.execute();
-
-    // Filter results by page-level permissions (if user is authenticated)
-    if (opts.userId && results.length > 0) {
-      const pageIds = results.map((r: any) => r.id);
-      const accessibleIds =
-        await this.pagePermissionRepo.filterAccessiblePageIds({
-          pageIds,
-          userId: opts.userId,
-          spaceId: searchParams.spaceId,
-        });
-      const accessibleSet = new Set(accessibleIds);
-      results = results.filter((r: any) => accessibleSet.has(r.id));
+    const limit = Math.min(searchParams.limit || 25, 100);
+    const requestedOffset = Math.max(searchParams.offset || 0, 0);
+    const authorized: any[] = [];
+    const candidateBatch = 100;
+    const authorizedNeeded = requestedOffset + limit;
+    for (let offset = 0; ; offset += candidateBatch) {
+      let candidates: any[] = await queryResults
+        .limit(candidateBatch)
+        .offset(offset)
+        .execute();
+      if (candidates.length === 0) break;
+      const candidateCount = candidates.length;
+      const coreAllowed = await this.lecAuthorization.filterPages(
+        candidates,
+        opts.user ?? null,
+      );
+      const coreAllowedIds = new Set(coreAllowed.map((result) => result.id));
+      candidates = candidates.filter((result: any) =>
+        coreAllowedIds.has(result.id),
+      );
+      if (opts.user && candidates.length > 0) {
+        const accessibleIds =
+          await this.pagePermissionRepo.filterAccessiblePageIds({
+            pageIds: candidates.map((result: any) => result.id),
+            userId: opts.user.id,
+            spaceId: searchParams.spaceId,
+          });
+        const accessibleSet = new Set(accessibleIds);
+        candidates = candidates.filter((result: any) =>
+          accessibleSet.has(result.id),
+        );
+      }
+      if (authorized.length < authorizedNeeded) {
+        authorized.push(
+          ...candidates.slice(0, authorizedNeeded - authorized.length),
+        );
+      }
+      if (candidateCount < candidateBatch) break;
     }
+    const selected = authorized.slice(requestedOffset, requestedOffset + limit);
+    if (selected.length === 0) return { items: [] };
+    let contentQuery = this.db
+      .selectFrom('pages')
+      .select([
+        'id',
+        'slugId',
+        'title',
+        'icon',
+        'parentPageId',
+        'creatorId',
+        'createdAt',
+        'updatedAt',
+        'textContent',
+      ])
+      .where(
+        'id',
+        'in',
+        selected.map((result) => result.id),
+      );
+    if (!searchParams.shareId && !opts.publicPageIds)
+      contentQuery = contentQuery.select((eb) => this.pageRepo.withSpace(eb));
+    const content = await contentQuery.execute();
+    const contentById = new Map(content.map((result) => [result.id, result]));
+    const results = selected
+      .map((candidate) => {
+        const page = contentById.get(candidate.id);
+        return {
+          ...page,
+          rank: candidate.rank,
+          highlight:
+            browseByFilters || titleOnly || !page?.textContent
+              ? ''
+              : this.highlight(page.textContent, query),
+          textContent: undefined,
+        };
+      })
+      .filter((result) => result.id);
 
     //@ts-ignore
     const searchResults = results.map((result: SearchResponseDto) => {
-      result.wholeWord = true
-      if (!result.highlight) {
-        result.matchedText = [];
-        return result;
-      }
-
-      result.highlight = result.highlight
-        .replace(/\r\n|\r|\n/g, ' ')
-        .replace(/\s+/g, ' ');
-
-      result.matchedText = [
-        ...new Set(
-          Array.from(
-            result.highlight.matchAll(/<b>([^<]*)<\/b>/gi),
-            (match) => match[1],
-          ),
-        ),
-      ];
-
+      result.wholeWord = false;
+      result.matchedText = result.highlight ? [query] : [];
       return result;
     });
 
@@ -218,7 +253,7 @@ export class SearchService {
 
   async searchSuggestions(
     suggestion: SearchSuggestionDTO,
-    userId: string,
+    user: User,
     workspaceId: string,
   ) {
     let users = [];
@@ -266,50 +301,81 @@ export class SearchService {
     }
 
     if (suggestion.includePages) {
-      let pageSearch = this.db
-        .selectFrom('pages')
-        .select(['id', 'slugId', 'title', 'icon', 'spaceId'])
-        .select((eb) => this.pageRepo.withSpace(eb))
-        .where((eb) =>
-          eb(
-            sql`LOWER(f_unaccent(pages.title))`,
-            'like',
-            sql`LOWER(f_unaccent(${`%${query}%`}))`,
-          ),
-        )
-        .where('deletedAt', 'is', null)
-        .where('workspaceId', '=', workspaceId)
-        .limit(limit);
-
-      // search all spaces the user has access to, prioritizing the current space
-      const userSpaceIds = await this.spaceMemberRepo.getUserSpaceIds(userId);
-
+      const userSpaceIds = await this.spaceMemberRepo.getUserSpaceIds(user.id);
       if (userSpaceIds?.length > 0) {
-        pageSearch = pageSearch.where('spaceId', 'in', userSpaceIds);
-
-        if (suggestion?.spaceId) {
-          pageSearch = pageSearch.orderBy(
-            sql`CASE WHEN pages."space_id" = ${suggestion.spaceId} THEN 0 ELSE 1 END`,
-            'asc',
+        const escapedQuery = query.replace(/[\\%_]/g, '\\$&');
+        const pageCandidates = this.db
+          .selectFrom('pages')
+          .select(['id', 'workspaceId'])
+          .where(
+            sql<string>`lower(f_unaccent(pages.title))`,
+            'like',
+            sql<string>`lower(f_unaccent(${`%${escapedQuery}%`}))`,
+          )
+          .where('deletedAt', 'is', null)
+          .where('workspaceId', '=', workspaceId)
+          .where('spaceId', 'in', userSpaceIds)
+          .$if(Boolean(suggestion.spaceId), (qb) =>
+            qb.orderBy(
+              sql`CASE WHEN pages."space_id" = ${suggestion.spaceId} THEN 0 ELSE 1 END`,
+              'asc',
+            ),
+          )
+          .orderBy('updatedAt', 'desc')
+          .orderBy('id', 'desc');
+        const selected: { id: string; workspaceId: string }[] = [];
+        for (let offset = 0; ; offset += 100) {
+          let candidates = await pageCandidates
+            .limit(100)
+            .offset(offset)
+            .execute();
+          if (candidates.length === 0) break;
+          const candidateCount = candidates.length;
+          candidates = await this.lecAuthorization.filterPages(
+            candidates,
+            user,
           );
+          if (candidates.length > 0) {
+            const accessibleIds =
+              await this.pagePermissionRepo.filterAccessiblePageIds({
+                pageIds: candidates.map((page) => page.id),
+                userId: user.id,
+              });
+            const accessible = new Set(accessibleIds);
+            const allowed = candidates.filter((page) =>
+              accessible.has(page.id),
+            );
+            if (selected.length < limit) {
+              selected.push(...allowed.slice(0, limit - selected.length));
+            }
+          }
+          if (candidateCount < 100) break;
         }
-
-        pages = await pageSearch.execute();
-      }
-
-      // Filter by page-level permissions
-      if (pages.length > 0) {
-        const pageIds = pages.map((p) => p.id);
-        const accessibleIds =
-          await this.pagePermissionRepo.filterAccessiblePageIds({
-            pageIds,
-            userId,
-          });
-        const accessibleSet = new Set(accessibleIds);
-        pages = pages.filter((p) => accessibleSet.has(p.id));
+        const pageIds = selected.slice(0, limit).map((page) => page.id);
+        if (pageIds.length > 0) {
+          const content = await this.db
+            .selectFrom('pages')
+            .select(['id', 'slugId', 'title', 'icon', 'spaceId', 'workspaceId'])
+            .select((eb) => this.pageRepo.withSpace(eb))
+            .where('id', 'in', pageIds)
+            .execute();
+          const byId = new Map(content.map((page) => [page.id, page]));
+          pages = pageIds.map((id) => byId.get(id)).filter(Boolean);
+        }
       }
     }
 
     return { users, groups, pages };
+  }
+
+  private highlight(text: string, query: string) {
+    const normalized = text.replace(/\s+/g, ' ');
+    const index = normalized
+      .toLocaleLowerCase()
+      .indexOf(query.toLocaleLowerCase());
+    if (index < 0) return '';
+    const start = Math.max(0, index - 48);
+    const end = Math.min(normalized.length, index + query.length + 96);
+    return `${start > 0 ? '…' : ''}${htmlEscape(normalized.slice(start, index))}<b>${htmlEscape(normalized.slice(index, index + query.length))}</b>${htmlEscape(normalized.slice(index + query.length, end))}${end < normalized.length ? '…' : ''}`;
   }
 }

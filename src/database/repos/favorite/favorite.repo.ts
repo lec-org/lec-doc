@@ -25,9 +25,12 @@ export class FavoriteRepo {
     private readonly spaceMemberRepo: SpaceMemberRepo,
   ) {}
 
-  async insert(favorite: InsertableFavorite): Promise<Favorite | undefined> {
+  async insert(
+    favorite: InsertableFavorite,
+    trx?: KyselyTransaction,
+  ): Promise<Favorite | undefined> {
     try {
-      return await this.db
+      return await dbOrTx(this.db, trx)
         .insertInto('favorites')
         .values(favorite)
         .returningAll()
@@ -66,12 +69,13 @@ export class FavoriteRepo {
       .execute();
   }
 
-  async getFavoriteIds(
+  async findFavoriteIdCandidates(
     userId: string,
     workspaceId: string,
     type: FavoriteType,
-    spaceId?: string,
-  ): Promise<{ items: string[]; meta: any }> {
+    spaceId: string | undefined,
+    pagination: PaginationOptions,
+  ) {
     const idColumn =
       type === FavoriteType.PAGE
         ? 'pageId'
@@ -81,7 +85,11 @@ export class FavoriteRepo {
 
     let query = this.db
       .selectFrom('favorites')
-      .select(['favorites.id', `favorites.${idColumn} as entityId`])
+      .select([
+        'favorites.id',
+        `favorites.${idColumn} as entityId`,
+        'favorites.workspaceId',
+      ])
       .where('favorites.userId', '=', userId)
       .where('favorites.workspaceId', '=', workspaceId)
       .where('favorites.type', '=', type);
@@ -92,21 +100,16 @@ export class FavoriteRepo {
       query = this.applySpaceFilter(query, type, spaceId);
     }
 
-    const result = await executeWithCursorPagination(query, {
-      perPage: 250,
+    return executeWithCursorPagination(query, {
+      perPage: pagination.limit,
+      cursor: pagination.cursor,
+      cursorPerRow: '$cursor',
       fields: [{ expression: 'favorites.id', direction: 'desc' }],
       parseCursor: (cursor) => ({ id: cursor.id }),
     });
-
-    return {
-      items: result.items
-        .map((r) => (r as any).entityId as string)
-        .filter(Boolean),
-      meta: result.meta,
-    };
   }
 
-  async findUserFavorites(
+  async findUserFavoriteCandidates(
     userId: string,
     workspaceId: string,
     pagination: PaginationOptions,
@@ -115,7 +118,12 @@ export class FavoriteRepo {
   ) {
     let query = this.db
       .selectFrom('favorites')
-      .selectAll('favorites')
+      .select([
+        'favorites.id',
+        'favorites.type',
+        'favorites.pageId',
+        'favorites.workspaceId',
+      ])
       .where('favorites.userId', '=', userId)
       .where('favorites.workspaceId', '=', workspaceId);
 
@@ -128,6 +136,26 @@ export class FavoriteRepo {
     if (spaceId) {
       query = this.applySpaceFilter(query, type, spaceId);
     }
+
+    return executeWithCursorPagination(query, {
+      perPage: pagination.limit,
+      cursor: pagination.cursor,
+      beforeCursor: pagination.beforeCursor,
+      cursorPerRow: '$cursor',
+      fields: [{ expression: 'favorites.id', direction: 'desc' }],
+      parseCursor: (cursor) => ({ id: cursor.id }),
+    });
+  }
+
+  async findUserFavoriteContentByIds(
+    favoriteIds: string[],
+    type?: FavoriteType,
+  ) {
+    if (favoriteIds.length === 0) return [];
+    let query = this.db
+      .selectFrom('favorites')
+      .selectAll('favorites')
+      .where('favorites.id', 'in', favoriteIds);
 
     if (type === FavoriteType.PAGE || !type) {
       query = query.select((eb) => this.withPage(eb));
@@ -145,15 +173,7 @@ export class FavoriteRepo {
       query = query.select((eb) => this.withTemplate(eb));
     }
 
-    return executeWithCursorPagination(query, {
-      perPage: pagination.limit,
-      cursor: pagination.cursor,
-      beforeCursor: pagination.beforeCursor,
-      fields: [{ expression: 'favorites.id', direction: 'desc' }],
-      parseCursor: (cursor) => ({
-        id: cursor.id,
-      }),
-    });
+    return query.execute();
   }
 
   async deleteByUsersWithoutSpaceAccess(

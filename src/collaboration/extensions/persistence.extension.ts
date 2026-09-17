@@ -1,6 +1,8 @@
 import {
   afterUnloadDocumentPayload,
+  Document,
   Extension,
+  Hocuspocus,
   onChangePayload,
   onLoadDocumentPayload,
   onStoreDocumentPayload,
@@ -33,20 +35,31 @@ import {
   HISTORY_INTERVAL,
 } from '../constants';
 import { TransclusionService } from '../../core/page/transclusion/transclusion.service';
+import { LecAuthorizationService } from '../../core/lec-authorization/lec-authorization.service';
+import { UserRepo } from '@docmost/db/repos/user/user.repo';
+import { LecCollabContext } from './authentication.extension';
+
+type DirtyActor = {
+  userId: string;
+  capability: 'EDIT' | 'COMMENT';
+  epoch: number;
+};
 
 @Injectable()
 export class PersistenceExtension implements Extension {
   private readonly logger = new Logger(PersistenceExtension.name);
-  private contributors: Map<string, Set<string>> = new Map();
+  private contributors = new Map<string, Map<string, DirtyActor>>();
+  private epochs = new Map<string, number>();
 
   constructor(
     private readonly pageRepo: PageRepo,
     @InjectKysely() private readonly db: KyselyDB,
-    @InjectQueue(QueueName.AI_QUEUE) private aiQueue: Queue,
     @InjectQueue(QueueName.HISTORY_QUEUE) private historyQueue: Queue,
     @InjectQueue(QueueName.NOTIFICATION_QUEUE) private notificationQueue: Queue,
     private readonly collabHistory: CollabHistoryService,
     private readonly transclusionService: TransclusionService,
+    private readonly authorization: LecAuthorizationService,
+    private readonly users: UserRepo,
   ) {}
 
   async onLoadDocument(data: onLoadDocumentPayload) {
@@ -99,9 +112,11 @@ export class PersistenceExtension implements Extension {
     const { documentName, document, lastContext } = data;
 
     const pageId = getPageId(documentName);
+    const snapshot = new Y.Doc();
+    Y.applyUpdate(snapshot, Y.encodeStateAsUpdate(document));
 
-    const tiptapJson = TiptapTransformer.fromYdoc(document, 'default');
-    const ydocState = Buffer.from(Y.encodeStateAsUpdate(document));
+    const tiptapJson = TiptapTransformer.fromYdoc(snapshot, 'default');
+    const ydocState = Buffer.from(Y.encodeStateAsUpdate(snapshot));
 
     let textContent = null;
 
@@ -112,7 +127,19 @@ export class PersistenceExtension implements Extension {
     }
 
     let page: Page = null;
-    const editingUserIds = this.consumeContributors(documentName);
+    const dirtyActors = this.dirtyActors(documentName);
+    if (dirtyActors.length === 0) return;
+    try {
+      await this.requireActors(pageId, dirtyActors);
+    } catch (error) {
+      // The in-memory Ydoc may already contain a revoked actor's update. Close
+      // every peer now, then evict after Hocuspocus releases saveMutex so the
+      // next connection reloads canonical DB state.
+      data.instance.closeConnections(documentName);
+      this.evictWhenIdle(data.instance, data.document);
+      throw error;
+    }
+    const editingUserIds = dirtyActors.map((actor) => actor.userId);
 
     try {
       await executeTx(this.db, async (trx) => {
@@ -151,7 +178,7 @@ export class PersistenceExtension implements Extension {
             content: tiptapJson,
             textContent: textContent,
             ydoc: ydocState,
-            lastUpdatedById: lastContext.user.id,
+            lastUpdatedById: dirtyActors[dirtyActors.length - 1].userId,
             contributorIds: contributorIds,
           },
           pageId,
@@ -160,8 +187,10 @@ export class PersistenceExtension implements Extension {
 
         this.logger.debug(`Page updated: ${pageId} - SlugId: ${page.slugId}`);
       });
+      this.consumeActors(documentName, dirtyActors);
     } catch (err) {
       this.logger.error(`Failed to update page ${pageId}`, err);
+      throw err;
     }
 
     if (page) {
@@ -208,42 +237,70 @@ export class PersistenceExtension implements Extension {
         } as IPageMentionNotificationJob);
       }
 
-      await this.aiQueue.add(QueueJob.PAGE_CONTENT_UPDATED, {
-        pageIds: [pageId],
-        workspaceId: page.workspaceId,
-      });
-
-      await this.enqueuePageHistory(page);
+      await this.enqueuePageHistory(
+        page,
+        dirtyActors[dirtyActors.length - 1].userId,
+      );
     }
   }
 
-  async onChange(data: onChangePayload) {
-    const documentName = data.documentName;
-    const userId = data.context?.user?.id;
-
-    if (!userId) return;
-
-    if (!this.contributors.has(documentName)) {
-      this.contributors.set(documentName, new Set());
-    }
-
-    this.contributors.get(documentName).add(userId);
+  async onChange(data: onChangePayload<LecCollabContext>) {
+    const { documentName, context } = data;
+    if (!context?.user?.id) return;
+    const epoch = (this.epochs.get(documentName) ?? 0) + 1;
+    this.epochs.set(documentName, epoch);
+    const actors = this.contributors.get(documentName) ?? new Map();
+    const prior = actors.get(context.user.id);
+    actors.set(context.user.id, {
+      userId: context.user.id,
+      capability:
+        prior?.epoch === epoch - 1 && prior.capability === 'EDIT'
+          ? 'EDIT'
+          : context.writeCapability,
+      epoch,
+    });
+    this.contributors.set(documentName, actors);
   }
 
   async afterUnloadDocument(data: afterUnloadDocumentPayload) {
     const documentName = data.documentName;
     this.contributors.delete(documentName);
+    this.epochs.delete(documentName);
   }
 
-  private consumeContributors(documentName: string): string[] {
-    const contributorSet = this.contributors.get(documentName);
-    if (!contributorSet) return [];
-    const userIds = [...contributorSet];
-    this.contributors.delete(documentName);
-    return userIds;
+  private dirtyActors(documentName: string): DirtyActor[] {
+    return [...(this.contributors.get(documentName)?.values() ?? [])];
   }
 
-  private async enqueuePageHistory(page: Page): Promise<void> {
+  private consumeActors(documentName: string, stored: DirtyActor[]) {
+    const current = this.contributors.get(documentName);
+    if (!current) return;
+    for (const actor of stored) {
+      if (current.get(actor.userId)?.epoch === actor.epoch)
+        current.delete(actor.userId);
+    }
+    if (current.size === 0) this.contributors.delete(documentName);
+  }
+
+  private evictWhenIdle(instance: Hocuspocus, document: Document) {
+    if (instance.shouldUnloadDocument(document)) {
+      void instance.unloadDocument(document);
+      return;
+    }
+    setImmediate(() => this.evictWhenIdle(instance, document));
+  }
+
+  private async requireActors(pageId: string, actors: DirtyActor[]) {
+    const page = await this.pageRepo.findById(pageId);
+    if (!page) throw new Error('Page not found');
+    for (const actor of actors) {
+      const user = await this.users.findById(actor.userId, page.workspaceId);
+      if (!user) throw new Error('Editing user unavailable');
+      await this.authorization.requirePage(page, user, actor.capability);
+    }
+  }
+
+  private async enqueuePageHistory(page: Page, actorId: string): Promise<void> {
     const pageAge = Date.now() - new Date(page.createdAt).getTime();
     const delay =
       pageAge < HISTORY_FAST_THRESHOLD
@@ -252,7 +309,7 @@ export class PersistenceExtension implements Extension {
 
     await this.historyQueue.add(
       QueueJob.PAGE_HISTORY,
-      { pageId: page.id } as IPageHistoryJob,
+      { pageId: page.id, actorId } as IPageHistoryJob,
       { jobId: page.id, delay },
     );
   }

@@ -50,10 +50,58 @@ export class LecAuthorizationService {
     );
   }
 
-  async requirePage(page: Page, user: User, capability: LecCapability) {
+  async requireSpace(
+    spaceId: string,
+    workspaceId: string,
+    user: User | null,
+    capability: LecCapability,
+  ) {
+    const [decision] = await this.check(user, workspaceId, [
+      {
+        resource_kind: 'DOCMOST_SPACE',
+        resource_id: spaceId,
+        capability,
+      },
+    ]);
+    if (!decision?.allowed) this.deny();
+    return decision;
+  }
+
+  async requirePage(
+    page: Pick<Page, 'id' | 'workspaceId' | 'deletedAt'>,
+    user: User | null,
+    capability: LecCapability,
+  ) {
     const [decision] = await this.page(page, user, [capability]);
     if (!decision?.allowed) this.deny();
     return decision;
+  }
+
+  async filterPages<T extends Pick<Page, 'id' | 'workspaceId'>>(
+    pages: T[],
+    user: User | null,
+    capability: LecCapability = 'VIEW',
+  ): Promise<T[]> {
+    if (!pages.length) return [];
+    const workspaceId = pages[0].workspaceId;
+    if (pages.some((page) => page.workspaceId !== workspaceId)) this.deny();
+    const allowed = new Set<string>();
+    for (let index = 0; index < pages.length; index += 100) {
+      const chunk = pages.slice(index, index + 100);
+      const decisions = await this.check(
+        user,
+        workspaceId,
+        chunk.map((page) => ({
+          resource_kind: 'DOCMOST_PAGE',
+          resource_id: page.id,
+          capability,
+        })),
+      );
+      decisions.forEach((decision) => {
+        if (decision.allowed) allowed.add(decision.resource_id);
+      });
+    }
+    return pages.filter((page) => allowed.has(page.id));
   }
 
   async requireTree(

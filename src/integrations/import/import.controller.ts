@@ -30,6 +30,7 @@ import {
   AUDIT_SERVICE,
   IAuditService,
 } from '../../integrations/audit/audit.service';
+import { LecAuthorizationService } from '../../core/lec-authorization/lec-authorization.service';
 
 @Controller()
 export class ImportController {
@@ -39,6 +40,7 @@ export class ImportController {
     private readonly importService: ImportService,
     private readonly spaceAbility: SpaceAbilityFactory,
     private readonly environmentService: EnvironmentService,
+    private readonly lecAuthorization: LecAuthorizationService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
 
@@ -90,9 +92,12 @@ export class ImportController {
       throw new ForbiddenException();
     }
 
+    const principal = await this.lecAuthorization.principal(user, workspace.id);
+    if (principal.type !== 'OIDC') this.lecAuthorization.deny();
     const createdPage = await this.importService.importPage(
       file,
-      user.id,
+      user,
+      principal,
       spaceId,
       workspace.id,
     );

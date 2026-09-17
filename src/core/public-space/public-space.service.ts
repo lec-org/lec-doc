@@ -20,6 +20,7 @@ import { PublicSpaceAppearanceDto } from './dto/public-space.dto';
 import { LicenseCheckService } from '../../integrations/environment/license-check.service';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { Feature, FeatureKey } from '../../common/features';
+import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
 
 @Injectable()
 export class PublicSpaceService {
@@ -32,6 +33,7 @@ export class PublicSpaceService {
     private readonly transclusionService: TransclusionService,
     private readonly licenseCheckService: LicenseCheckService,
     private readonly environmentService: EnvironmentService,
+    private readonly authorization: LecAuthorizationService,
   ) {}
 
   hasFeature(workspace: Workspace, feature: FeatureKey): boolean {
@@ -70,8 +72,36 @@ export class PublicSpaceService {
     return { space, publicSpace };
   }
 
+  private async getAuthorizedPublicSpace(
+    spaceSlug: string,
+    workspace: Workspace,
+  ) {
+    if (!this.isPublicSpacesAllowed(workspace)) {
+      throw new NotFoundException('Space not found');
+    }
+
+    const candidate = await this.spaceRepo.findAuthorizationSubject(
+      spaceSlug,
+      workspace.id,
+    );
+    if (!candidate || candidate.deletedAt) {
+      throw new NotFoundException('Space not found');
+    }
+    try {
+      await this.authorization.requireSpace(
+        candidate.id,
+        workspace.id,
+        null,
+        'VIEW',
+      );
+    } catch {
+      throw new NotFoundException('Space not found');
+    }
+    return this.getPublicSpace(spaceSlug, workspace);
+  }
+
   async getPublicSpaceInfo(spaceSlug: string, workspace: Workspace) {
-    const { space, publicSpace } = await this.getPublicSpace(
+    const { space, publicSpace } = await this.getAuthorizedPublicSpace(
       spaceSlug,
       workspace,
     );
@@ -83,12 +113,15 @@ export class PublicSpaceService {
   }
 
   async getPublicSpaceTree(spaceSlug: string, workspace: Workspace) {
-    const { space, publicSpace } = await this.getPublicSpace(
+    const { space, publicSpace } = await this.getAuthorizedPublicSpace(
       spaceSlug,
       workspace,
     );
+    const candidates = await this.pageRepo.findSpacePageCandidates(space.id);
+    const allowed = await this.authorization.filterPages(candidates, null);
     const pageTree = await this.pageRepo.getSpacePagesExcludingRestricted(
       space.id,
+      allowed.map((page) => page.id),
     );
     return {
       space: this.toPublicSpaceFields(space),
@@ -105,7 +138,7 @@ export class PublicSpaceService {
   ) {
     const includeContent = opts?.includeContent !== false;
 
-    const { space, publicSpace } = await this.getPublicSpace(
+    const { space, publicSpace } = await this.getAuthorizedPublicSpace(
       spaceSlug,
       workspace,
     );
@@ -126,6 +159,16 @@ export class PublicSpaceService {
         };
       }
       pageId = firstRoot.id;
+    }
+
+    const candidate = await this.pageRepo.findAuthorizationSubject(pageId);
+    if (!candidate || candidate.workspaceId !== workspace.id) {
+      throw new NotFoundException('Page not found');
+    }
+    try {
+      await this.authorization.requirePage(candidate, null, 'VIEW');
+    } catch {
+      throw new NotFoundException('Page not found');
     }
 
     const page = includeContent
@@ -216,8 +259,9 @@ export class PublicSpaceService {
       candidatePageIds.map(async (pageId) => {
         const page = await this.pageRepo.findById(pageId);
         if (!page || page.deletedAt || page.spaceId !== space.id) return null;
-        const restricted =
-          await this.pagePermissionRepo.hasRestrictedAncestor(page.id);
+        const restricted = await this.pagePermissionRepo.hasRestrictedAncestor(
+          page.id,
+        );
         if (restricted) return null;
         return page.id;
       }),
@@ -274,7 +318,10 @@ export class PublicSpaceService {
       );
     }
 
-    if (appearance && !this.hasFeature(workspace, Feature.PUBLIC_SPACE_APPEARANCE)) {
+    if (
+      appearance &&
+      !this.hasFeature(workspace, Feature.PUBLIC_SPACE_APPEARANCE)
+    ) {
       throw new ForbiddenException(
         'Public docs appearance requires a paid license',
       );

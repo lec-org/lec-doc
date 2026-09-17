@@ -141,10 +141,7 @@ export class ShareRepo {
     trx?: KyselyTransaction,
   ): Promise<void> {
     const db = dbOrTx(this.db, trx);
-    await db
-      .deleteFrom('shares')
-      .where('spaceId', '=', spaceId)
-      .execute();
+    await db.deleteFrom('shares').where('spaceId', '=', spaceId).execute();
   }
 
   async deleteByWorkspaceId(
@@ -158,28 +155,74 @@ export class ShareRepo {
       .execute();
   }
 
-  async getShares(userId: string, pagination: PaginationOptions) {
+  async findAuthorizationSubject(shareId: string) {
+    return this.db
+      .selectFrom('shares')
+      .innerJoin('pages', 'pages.id', 'shares.pageId')
+      .select([
+        'shares.id as shareId',
+        'pages.id',
+        'pages.workspaceId',
+        'pages.spaceId',
+        'pages.deletedAt',
+      ])
+      .where(
+        isValidUUID(shareId) ? 'shares.id' : sql`LOWER(shares.key)`,
+        '=',
+        shareId.toLowerCase(),
+      )
+      .executeTakeFirst();
+  }
+
+  async findCandidates(
+    userId: string,
+    workspaceId: string,
+    pagination: PaginationOptions,
+  ) {
     const query = this.db
       .selectFrom('shares')
-      .select(this.baseFields)
-      .select((eb) => this.withPage(eb))
-      .select((eb) => this.withSpace(eb, userId))
-      .select((eb) => this.withCreator(eb))
-      .where('spaceId', 'in', this.spaceMemberRepo.getUserSpaceIdsQuery(userId));
+      .innerJoin('pages', 'pages.id', 'shares.pageId')
+      .select([
+        'shares.id',
+        'shares.pageId',
+        'shares.updatedAt',
+        'pages.workspaceId',
+      ])
+      .where('shares.workspaceId', '=', workspaceId)
+      .where('pages.workspaceId', '=', workspaceId)
+      .where('pages.deletedAt', 'is', null)
+      .where(
+        'shares.spaceId',
+        'in',
+        this.spaceMemberRepo.getUserSpaceIdsQuery(userId),
+      );
 
     return executeWithCursorPagination(query, {
       perPage: pagination.limit,
       cursor: pagination.cursor,
       beforeCursor: pagination.beforeCursor,
+      cursorPerRow: '$cursor',
       fields: [
-        { expression: 'updatedAt', direction: 'desc' },
-        { expression: 'id', direction: 'desc' },
+        { expression: 'shares.updatedAt', direction: 'desc' },
+        { expression: 'shares.id', direction: 'desc' },
       ],
       parseCursor: (cursor) => ({
         updatedAt: new Date(cursor.updatedAt),
         id: cursor.id,
       }),
     });
+  }
+
+  async findContentByIds(shareIds: string[], userId: string) {
+    if (shareIds.length === 0) return [];
+    return this.db
+      .selectFrom('shares')
+      .select(this.baseFields)
+      .select((eb) => this.withPage(eb))
+      .select((eb) => this.withSpace(eb, userId))
+      .select((eb) => this.withCreator(eb))
+      .where('id', 'in', shareIds)
+      .execute();
   }
 
   withPage(eb: ExpressionBuilder<DB, 'shares'>) {

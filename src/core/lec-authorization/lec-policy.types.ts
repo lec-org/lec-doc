@@ -68,6 +68,27 @@ export const resourceSchema = z.strictObject({
 });
 export type LecResource = z.infer<typeof resourceSchema>;
 export const resourceEnvelopeSchema = z.strictObject({ data: resourceSchema });
+export const reparentEnvelopeSchema = z.strictObject({
+  data: resourceSchema.extend({
+    operation_id: z.uuid(),
+    operation_status: z.enum(['PREPARED', 'COMMITTED', 'CANCELLED']),
+  }),
+});
+export const accessRequestEnvelopeSchema = z.strictObject({
+  data: z.strictObject({
+    id: z.uuid(),
+    workspace_id: z.uuid(),
+    resource_kind: resourceKindSchema,
+    resource_id: z.uuid(),
+    user_id: z.uuid(),
+    status: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'REVOKED']),
+    reason: z.string().min(1).max(1000),
+    reviewed_by: z.uuid().nullable(),
+    expires_at: z.iso.datetime({ offset: true }).nullable(),
+    created_at: z.iso.datetime({ offset: true }),
+    updated_at: z.iso.datetime({ offset: true }),
+  }),
+});
 export const treeResponseSchema = z.strictObject({
   data: z.strictObject({
     operation_id: z.uuid(),

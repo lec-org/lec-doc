@@ -113,6 +113,7 @@ export class CommentService {
 
     this.generalQueue
       .add(QueueJob.ADD_PAGE_WATCHERS, {
+        actorId: user.id,
         userIds: [user.id],
         pageId: page.id,
         spaceId: page.spaceId,

@@ -10,6 +10,12 @@ export type Generated<T> =
     ? ColumnType<S, I | undefined, U>
     : ColumnType<T, T | undefined, T>;
 
+export type Int8 = ColumnType<
+  string,
+  bigint | number | string,
+  bigint | number | string
+>;
+
 export type Json = JsonValue;
 
 export type JsonArray = JsonValue[];
@@ -24,11 +30,58 @@ export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
+export interface LecCoreRevocationInbox {
+  createdAt: Generated<Timestamp>;
+  eventId: string;
+  publishedAt: Timestamp | null;
+  resourceId: string;
+  resourceKind: string;
+  resourceVersion: Int8;
+  supersededAt: Timestamp | null;
+  workspaceId: string;
+}
+
+export interface LecDocumentNotificationOutbox {
+  attempts: Generated<number>;
+  availableAt: Generated<Timestamp>;
+  completedAt: Timestamp | null;
+  createdAt: Generated<Timestamp>;
+  lastError: string | null;
+  leaseUntil: Timestamp | null;
+  notificationId: string;
+  suppressedAt: Timestamp | null;
+  updatedAt: Generated<Timestamp>;
+}
+
 export interface LecIdentities {
   createdAt: Generated<Timestamp>;
   issuer: string;
   subject: string;
   userId: string;
+  workspaceId: string;
+}
+
+export interface LecPageControlOperations {
+  action: string;
+  actorIssuer: string;
+  actorSubject: string;
+  actorUserId: string | null;
+  attempts: Generated<number>;
+  availableAt: Generated<Timestamp>;
+  createdAt: Generated<Timestamp>;
+  expectedVersion: Int8;
+  expiresAt: Timestamp | null;
+  id: string;
+  lastErrorCode: string | null;
+  leaseUntil: Timestamp | null;
+  localPageAccessId: string | null;
+  pageId: string;
+  recipientIssuer: string;
+  recipientSubject: string;
+  recipientUserId: string | null;
+  spaceId: string;
+  status: string;
+  updatedAt: Generated<Timestamp>;
   workspaceId: string;
 }
 
@@ -53,7 +106,19 @@ export interface LecResourceOperations {
   workspaceId: string;
 }
 
+export interface PageLikes {
+  createdAt: Generated<Timestamp>;
+  id: Generated<string>;
+  pageId: string;
+  userId: string;
+  workspaceId: string;
+}
+
 export interface DB {
+  lecCoreRevocationInbox: LecCoreRevocationInbox;
+  lecDocumentNotificationOutbox: LecDocumentNotificationOutbox;
   lecIdentities: LecIdentities;
+  lecPageControlOperations: LecPageControlOperations;
   lecResourceOperations: LecResourceOperations;
+  pageLikes: PageLikes;
 }

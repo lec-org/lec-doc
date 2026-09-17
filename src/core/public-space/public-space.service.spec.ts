@@ -22,25 +22,34 @@ function makeService(overrides: any = {}) {
     upsert: jest.fn().mockImplementation(async (opts) => opts),
     ...overrides.publicSpaceRepo,
   };
+  const space = {
+    id: SPACE_ID,
+    slug: 'handbook',
+    name: 'Handbook',
+    workspaceId: WORKSPACE_ID,
+    deletedAt: null,
+  };
   const spaceRepo = {
-    findBySlug: jest.fn().mockResolvedValue({
-      id: SPACE_ID,
-      slug: 'handbook',
-      name: 'Handbook',
-      workspaceId: WORKSPACE_ID,
-      deletedAt: null,
+    findAuthorizationSubject: jest.fn().mockResolvedValue({
+      id: space.id,
+      workspaceId: space.workspaceId,
+      deletedAt: space.deletedAt,
     }),
+    findBySlug: jest.fn().mockResolvedValue(space),
     ...overrides.spaceRepo,
   };
+  const page = {
+    id: 'page1',
+    slugId: 'abc123XYZ0',
+    spaceId: SPACE_ID,
+    workspaceId: WORKSPACE_ID,
+    deletedAt: null,
+    content: null,
+  };
   const pageRepo = {
-    findById: jest.fn().mockResolvedValue({
-      id: 'page1',
-      slugId: 'abc123XYZ0',
-      spaceId: SPACE_ID,
-      workspaceId: WORKSPACE_ID,
-      deletedAt: null,
-      content: null,
-    }),
+    findAuthorizationSubject: jest.fn().mockResolvedValue(page),
+    findById: jest.fn().mockResolvedValue(page),
+    findSpacePageCandidates: jest.fn().mockResolvedValue([]),
     getSpacePagesExcludingRestricted: jest.fn().mockResolvedValue([]),
     getFirstUnrestrictedRootPage: jest
       .fn()
@@ -52,7 +61,9 @@ function makeService(overrides: any = {}) {
     ...overrides.pagePermissionRepo,
   };
   const shareService = {
-    updatePublicAttachments: jest.fn().mockImplementation(async (p) => p.content),
+    updatePublicAttachments: jest
+      .fn()
+      .mockImplementation(async (p) => p.content),
     sanitizeTransclusionItemsForPublic: jest
       .fn()
       .mockImplementation(async (items) => items),
@@ -64,13 +75,22 @@ function makeService(overrides: any = {}) {
   };
 
   const licenseCheckService = {
-    resolveFeatures: jest.fn().mockReturnValue([Feature.PUBLIC_SPACE_APPEARANCE]),
+    resolveFeatures: jest
+      .fn()
+      .mockReturnValue([Feature.PUBLIC_SPACE_APPEARANCE]),
     ...overrides.licenseCheckService,
   };
 
   const environmentService = {
     isBetaPublicSpaces: jest.fn().mockReturnValue(true),
     ...overrides.environmentService,
+  };
+
+  const authorization = {
+    requireSpace: jest.fn().mockResolvedValue({ allowed: true }),
+    requirePage: jest.fn().mockResolvedValue({ allowed: true }),
+    filterPages: jest.fn().mockImplementation(async (pages) => pages),
+    ...overrides.authorization,
   };
 
   const service = new PublicSpaceService(
@@ -82,6 +102,7 @@ function makeService(overrides: any = {}) {
     transclusionService as any,
     licenseCheckService as any,
     environmentService as any,
+    authorization as any,
   );
   return {
     service,
@@ -93,6 +114,7 @@ function makeService(overrides: any = {}) {
     transclusionService,
     licenseCheckService,
     environmentService,
+    authorization,
   };
 }
 
@@ -176,19 +198,99 @@ describe('PublicSpaceService', () => {
     });
   });
 
+  describe('anonymous Core authorization', () => {
+    it.each([
+      [
+        'info',
+        (service, workspace) =>
+          service.getPublicSpaceInfo('handbook', workspace),
+      ],
+      [
+        'tree',
+        (service, workspace) =>
+          service.getPublicSpaceTree('handbook', workspace),
+      ],
+    ])(
+      'does not read sensitive public-space %s fields when anonymous space VIEW is denied',
+      async (_name, call) => {
+        const { service, spaceRepo, pageRepo } = makeService({
+          authorization: {
+            requireSpace: jest
+              .fn()
+              .mockRejectedValue(new Error('anonymous Core VIEW denied')),
+          },
+        });
+
+        await expect(
+          call(service, makeWorkspace(optInSettings)),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(spaceRepo.findBySlug).not.toHaveBeenCalled();
+        expect(pageRepo.findSpacePageCandidates).not.toHaveBeenCalled();
+        expect(
+          pageRepo.getSpacePagesExcludingRestricted,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it('filters tree candidates through anonymous Core VIEW before reading titles or icons', async () => {
+      const candidates = [
+        { id: 'allowed', workspaceId: WORKSPACE_ID },
+        { id: 'denied', workspaceId: WORKSPACE_ID },
+      ];
+      const findSpacePageCandidates = jest.fn().mockResolvedValue(candidates);
+      const getSpacePagesExcludingRestricted = jest
+        .fn()
+        .mockResolvedValue([{ id: 'allowed', title: 'Allowed', icon: null }]);
+      const filterPages = jest.fn().mockResolvedValue([candidates[0]]);
+      const { service } = makeService({
+        pageRepo: {
+          findSpacePageCandidates,
+          getSpacePagesExcludingRestricted,
+        },
+        authorization: { filterPages },
+      });
+
+      await service.getPublicSpaceTree(
+        'handbook',
+        makeWorkspace(optInSettings),
+      );
+
+      expect(filterPages).toHaveBeenCalledWith(candidates, null);
+      expect(findSpacePageCandidates.mock.invocationCallOrder[0]).toBeLessThan(
+        getSpacePagesExcludingRestricted.mock.invocationCallOrder[0],
+      );
+      expect(filterPages.mock.invocationCallOrder[0]).toBeLessThan(
+        getSpacePagesExcludingRestricted.mock.invocationCallOrder[0],
+      );
+      expect(getSpacePagesExcludingRestricted).toHaveBeenCalledWith(SPACE_ID, [
+        'allowed',
+      ]);
+    });
+  });
+
   describe('getPublicPage', () => {
     it('404s for a page belonging to another space', async () => {
       const { service } = makeService({
         pageRepo: {
+          findAuthorizationSubject: jest.fn().mockResolvedValue({
+            id: 'page2',
+            workspaceId: WORKSPACE_ID,
+            deletedAt: null,
+          }),
           findById: jest.fn().mockResolvedValue({
             id: 'page2',
             spaceId: 'other-space',
+            workspaceId: WORKSPACE_ID,
             deletedAt: null,
           }),
         },
       });
       await expect(
-        service.getPublicPage('handbook', 'abc123XYZ0', makeWorkspace(optInSettings)),
+        service.getPublicPage(
+          'handbook',
+          'abc123XYZ0',
+          makeWorkspace(optInSettings),
+        ),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -199,7 +301,11 @@ describe('PublicSpaceService', () => {
         },
       });
       await expect(
-        service.getPublicPage('handbook', 'abc123XYZ0', makeWorkspace(optInSettings)),
+        service.getPublicPage(
+          'handbook',
+          'abc123XYZ0',
+          makeWorkspace(optInSettings),
+        ),
       ).rejects.toThrow(NotFoundException);
     });
 
@@ -210,22 +316,26 @@ describe('PublicSpaceService', () => {
         undefined,
         makeWorkspace(optInSettings),
       );
-      expect(pageRepo.getFirstUnrestrictedRootPage).toHaveBeenCalledWith(SPACE_ID);
+      expect(pageRepo.getFirstUnrestrictedRootPage).toHaveBeenCalledWith(
+        SPACE_ID,
+      );
       expect(result.page.id).toBe('page1');
     });
 
     it('sanitizes the served page content for public delivery', async () => {
       const sanitizedDoc = { type: 'doc', sanitized: true };
+      const page = {
+        id: 'page1',
+        slugId: 'abc123XYZ0',
+        spaceId: SPACE_ID,
+        workspaceId: WORKSPACE_ID,
+        deletedAt: null,
+        content: { type: 'doc', content: [] },
+      };
       const { service, shareService } = makeService({
         pageRepo: {
-          findById: jest.fn().mockResolvedValue({
-            id: 'page1',
-            slugId: 'abc123XYZ0',
-            spaceId: SPACE_ID,
-            workspaceId: WORKSPACE_ID,
-            deletedAt: null,
-            content: { type: 'doc', content: [] },
-          }),
+          findAuthorizationSubject: jest.fn().mockResolvedValue(page),
+          findById: jest.fn().mockResolvedValue(page),
         },
         shareService: {
           updatePublicAttachments: jest.fn().mockResolvedValue(sanitizedDoc),
@@ -256,6 +366,28 @@ describe('PublicSpaceService', () => {
         makeWorkspace(optInSettings),
       );
       expect(result.page).toBeNull();
+    });
+
+    it('returns not found before reading page metadata or content when anonymous VIEW is denied', async () => {
+      const { service, pageRepo, pagePermissionRepo, shareService } =
+        makeService({
+          authorization: {
+            requirePage: jest
+              .fn()
+              .mockRejectedValue(new Error('anonymous Core VIEW denied')),
+          },
+        });
+
+      await expect(
+        service.getPublicPage(
+          'handbook',
+          'abc123XYZ0',
+          makeWorkspace(optInSettings),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(pageRepo.findById).not.toHaveBeenCalled();
+      expect(pagePermissionRepo.hasRestrictedAncestor).not.toHaveBeenCalled();
+      expect(shareService.updatePublicAttachments).not.toHaveBeenCalled();
     });
 
     it('skips content preparation when includeContent is false', async () => {
@@ -294,7 +426,8 @@ describe('PublicSpaceService', () => {
         makeWorkspace(optInSettings),
       );
 
-      const accessSet = transclusionService.lookupWithAccessSet.mock.calls[0][1];
+      const accessSet =
+        transclusionService.lookupWithAccessSet.mock.calls[0][1];
       expect(Array.from(accessSet)).toEqual([]);
     });
 
@@ -311,7 +444,8 @@ describe('PublicSpaceService', () => {
         makeWorkspace(optInSettings),
       );
 
-      const accessSet = transclusionService.lookupWithAccessSet.mock.calls[0][1];
+      const accessSet =
+        transclusionService.lookupWithAccessSet.mock.calls[0][1];
       expect(Array.from(accessSet)).toEqual([]);
     });
 
@@ -324,7 +458,8 @@ describe('PublicSpaceService', () => {
         makeWorkspace(optInSettings),
       );
 
-      const accessSet = transclusionService.lookupWithAccessSet.mock.calls[0][1];
+      const accessSet =
+        transclusionService.lookupWithAccessSet.mock.calls[0][1];
       expect(Array.from(accessSet)).toEqual(['page1']);
     });
 
@@ -389,7 +524,9 @@ describe('PublicSpaceService', () => {
         expect(spaceRepo.findBySlug).not.toHaveBeenCalled();
         expect(publicSpaceRepo.findBySpaceId).not.toHaveBeenCalled();
         expect(pageRepo.findById).not.toHaveBeenCalled();
-        expect(pageRepo.getSpacePagesExcludingRestricted).not.toHaveBeenCalled();
+        expect(
+          pageRepo.getSpacePagesExcludingRestricted,
+        ).not.toHaveBeenCalled();
       },
     );
 
@@ -1016,7 +1153,10 @@ describe('PublicSpaceService', () => {
 
     it('resolves a contentless probe into another published space', async () => {
       const { service } = makeService({
-        pageRepo: { findById: jest.fn().mockResolvedValue(crossSpacePage) },
+        pageRepo: {
+          findAuthorizationSubject: jest.fn().mockResolvedValue(crossSpacePage),
+          findById: jest.fn().mockResolvedValue(crossSpacePage),
+        },
         spaceRepo: { findById: jest.fn().mockResolvedValue(otherSpace) },
       });
       const result = await service.getPublicPage(
@@ -1031,7 +1171,10 @@ describe('PublicSpaceService', () => {
 
     it('404s a cross-space target when content is requested', async () => {
       const { service } = makeService({
-        pageRepo: { findById: jest.fn().mockResolvedValue(crossSpacePage) },
+        pageRepo: {
+          findAuthorizationSubject: jest.fn().mockResolvedValue(crossSpacePage),
+          findById: jest.fn().mockResolvedValue(crossSpacePage),
+        },
         spaceRepo: { findById: jest.fn().mockResolvedValue(otherSpace) },
       });
       await expect(
@@ -1045,7 +1188,10 @@ describe('PublicSpaceService', () => {
 
     it('404s when the target space is not published', async () => {
       const { service } = makeService({
-        pageRepo: { findById: jest.fn().mockResolvedValue(crossSpacePage) },
+        pageRepo: {
+          findAuthorizationSubject: jest.fn().mockResolvedValue(crossSpacePage),
+          findById: jest.fn().mockResolvedValue(crossSpacePage),
+        },
         spaceRepo: { findById: jest.fn().mockResolvedValue(otherSpace) },
         publicSpaceRepo: {
           findBySpaceId: jest
@@ -1069,7 +1215,10 @@ describe('PublicSpaceService', () => {
 
     it('404s when the target space is outside the workspace', async () => {
       const { service } = makeService({
-        pageRepo: { findById: jest.fn().mockResolvedValue(crossSpacePage) },
+        pageRepo: {
+          findAuthorizationSubject: jest.fn().mockResolvedValue(crossSpacePage),
+          findById: jest.fn().mockResolvedValue(crossSpacePage),
+        },
         spaceRepo: { findById: jest.fn().mockResolvedValue(undefined) },
       });
       await expect(
@@ -1084,7 +1233,10 @@ describe('PublicSpaceService', () => {
 
     it('404s when the cross-space target has a restricted ancestor', async () => {
       const { service } = makeService({
-        pageRepo: { findById: jest.fn().mockResolvedValue(crossSpacePage) },
+        pageRepo: {
+          findAuthorizationSubject: jest.fn().mockResolvedValue(crossSpacePage),
+          findById: jest.fn().mockResolvedValue(crossSpacePage),
+        },
         spaceRepo: { findById: jest.fn().mockResolvedValue(otherSpace) },
         pagePermissionRepo: {
           hasRestrictedAncestor: jest.fn().mockResolvedValue(true),

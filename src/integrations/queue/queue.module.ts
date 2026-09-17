@@ -3,7 +3,6 @@ import { BullModule } from '@nestjs/bullmq';
 import { EnvironmentService } from '../environment/environment.service';
 import { createRetryStrategy, parseRedisUrl } from '../../common/helpers';
 import { QueueName } from './constants';
-import { GeneralQueueProcessor } from './processors/general-queue.processor';
 
 @Global()
 @Module({
@@ -56,15 +55,8 @@ import { GeneralQueueProcessor } from './processors/general-queue.processor';
       defaultJobOptions: {
         removeOnComplete: true,
         removeOnFail: true,
-        attempts: 1,
-      },
-    }),
-    BullModule.registerQueue({
-      name: QueueName.AI_QUEUE,
-      defaultJobOptions: {
-        removeOnComplete: true,
-        removeOnFail: true,
-        attempts: 1,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 20_000 },
       },
     }),
     BullModule.registerQueue({
@@ -96,6 +88,5 @@ import { GeneralQueueProcessor } from './processors/general-queue.processor';
     }),
   ],
   exports: [BullModule],
-  providers: [GeneralQueueProcessor],
 })
 export class QueueModule {}

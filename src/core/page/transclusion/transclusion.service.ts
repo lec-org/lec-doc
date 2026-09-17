@@ -23,6 +23,7 @@ import { rewriteAttachmentsForUnsync } from './utils/transclusion-unsync.util';
 import { TransclusionLookup } from './transclusion.types';
 import { Page, User } from '@docmost/db/types/entity.types';
 import { PageAccessService } from '../page-access/page-access.service';
+import { LecAuthorizationService } from '../../lec-authorization/lec-authorization.service';
 
 type ReferencingPageInfo = {
   id: string;
@@ -47,6 +48,7 @@ export class TransclusionService {
     private readonly attachmentRepo: AttachmentRepo,
     private readonly storageService: StorageService,
     private readonly pageAccessService: PageAccessService,
+    private readonly lecAuthorization: LecAuthorizationService,
   ) {}
 
   async syncPageTransclusions(
@@ -115,16 +117,15 @@ export class TransclusionService {
     trx?: KyselyTransaction,
   ): Promise<{ inserted: number; deleted: number }> {
     const desired = collectReferencesFromPmJson(pmJson);
-    const keyOf = (s: {
-      sourcePageId: string;
-      transclusionId: string;
-    }) => `${s.sourcePageId}::${s.transclusionId}`;
+    const keyOf = (s: { sourcePageId: string; transclusionId: string }) =>
+      `${s.sourcePageId}::${s.transclusionId}`;
     const desiredKeys = new Set(desired.map(keyOf));
 
-    const existing = await this.pageTransclusionReferencesRepo.findByReferencePageId(
-      referencePageId,
-      trx,
-    );
+    const existing =
+      await this.pageTransclusionReferencesRepo.findByReferencePageId(
+        referencePageId,
+        trx,
+      );
     const existingKeys = new Set(existing.map(keyOf));
 
     const toInsert = desired
@@ -218,42 +219,51 @@ export class TransclusionService {
   }
 
   /**
-   * Resolve viewer access for source page IDs supplied by an authenticated
-   * caller. Restricts candidates to pages the viewer can see at the space
-   * level before applying page-level restrictions, so a workspace member
-   * cannot read a sync block from a private space they don't belong to via
-   * an unrestricted source page.
+   * Resolve viewer access for candidate page IDs supplied by an authenticated
+   * caller. Core VIEW authorization is evaluated before local ACLs; local
+   * space membership and page restrictions may only narrow Core's allow set.
    */
   private async filterViewerAccessiblePageIds(
     pageIds: string[],
-    viewerUserId: string,
+    viewer: User,
     workspaceId: string,
   ): Promise<string[]> {
     if (pageIds.length === 0) return [];
 
+    const coreAllowed = await this.lecAuthorization.filterPages(
+      pageIds.map((id) => ({ id, workspaceId })),
+      viewer,
+      'VIEW',
+    );
+    if (coreAllowed.length === 0) return [];
+
     const spaceVisible = await this.db
       .selectFrom('pages')
       .select('id')
-      .where('id', 'in', pageIds)
+      .where(
+        'id',
+        'in',
+        coreAllowed.map((page) => page.id),
+      )
       .where('workspaceId', '=', workspaceId)
       .where('deletedAt', 'is', null)
       .where(
         'spaceId',
         'in',
-        this.spaceMemberRepo.getUserSpaceIdsQuery(viewerUserId),
+        this.spaceMemberRepo.getUserSpaceIdsQuery(viewer.id),
       )
       .execute();
     if (spaceVisible.length === 0) return [];
 
     return this.pagePermissionRepo.filterAccessiblePageIds({
-      pageIds: spaceVisible.map((r) => r.id),
-      userId: viewerUserId,
+      pageIds: spaceVisible.map((page) => page.id),
+      userId: viewer.id,
     });
   }
 
   async lookup(
     references: Array<{ sourcePageId: string; transclusionId: string }>,
-    viewerUserId: string,
+    viewer: User,
     workspaceId: string,
   ): Promise<{ items: TransclusionLookup[] }> {
     if (references.length === 0) return { items: [] };
@@ -264,7 +274,7 @@ export class TransclusionService {
     const accessibleSet = new Set(
       await this.filterViewerAccessiblePageIds(
         candidatePageIds,
-        viewerUserId,
+        viewer,
         workspaceId,
       ),
     );
@@ -356,13 +366,13 @@ export class TransclusionService {
   async listReferences(opts: {
     sourcePageId: string;
     transclusionId: string;
-    viewerUserId: string;
+    viewer: User;
     workspaceId: string;
   }): Promise<{
     source: ReferencingPageInfo | null;
     references: ReferencingPageInfo[];
   }> {
-    const { sourcePageId, transclusionId, viewerUserId, workspaceId } = opts;
+    const { sourcePageId, transclusionId, viewer, workspaceId } = opts;
 
     const referencePageIds =
       await this.pageTransclusionReferencesRepo.findReferencePageIdsByTransclusion(
@@ -377,7 +387,7 @@ export class TransclusionService {
     const accessibleSet = new Set(
       await this.filterViewerAccessiblePageIds(
         candidatePageIds,
-        viewerUserId,
+        viewer,
         workspaceId,
       ),
     );
@@ -470,9 +480,7 @@ export class TransclusionService {
       const oldIds = copies.map((c) => c.oldAttachmentId);
       const oldRows = await this.attachmentRepo.findByIds(oldIds);
       const byOldId = new Map(
-        oldRows
-          .filter((a) => a.pageId === sourcePageId)
-          .map((a) => [a.id, a]),
+        oldRows.filter((a) => a.pageId === sourcePageId).map((a) => [a.id, a]),
       );
 
       for (const plan of copies) {

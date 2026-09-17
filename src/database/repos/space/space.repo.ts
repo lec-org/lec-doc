@@ -22,6 +22,19 @@ export class SpaceRepo {
     private eventEmitter: EventEmitter2,
   ) {}
 
+  async findAuthorizationSubject(spaceId: string, workspaceId: string) {
+    let query = this.db
+      .selectFrom('spaces')
+      .select(['id', 'workspaceId', 'deletedAt'])
+      .where('workspaceId', '=', workspaceId);
+
+    query = isValidUUID(spaceId)
+      ? query.where('id', '=', spaceId)
+      : query.where(sql`LOWER(slug)`, '=', sql`LOWER(${spaceId})`);
+
+    return query.executeTakeFirst();
+  }
+
   async findById(
     spaceId: string,
     workspaceId: string,

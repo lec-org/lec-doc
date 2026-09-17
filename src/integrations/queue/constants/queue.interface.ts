@@ -1,6 +1,7 @@
 import { MentionNode } from '../../../common/helpers/prosemirror/utils';
 
 export interface IPageBacklinkJob {
+  actorId: string;
   pageId: string;
   workspaceId: string;
   mentions: MentionNode[];
@@ -8,6 +9,7 @@ export interface IPageBacklinkJob {
 }
 
 export interface IAddPageWatchersJob {
+  actorId: string;
   userIds: string[];
   pageId: string;
   spaceId: string;
@@ -19,6 +21,7 @@ export interface IStripeSeatsSyncJob {
 }
 
 export interface IPageHistoryJob {
+  actorId: string;
   pageId: string;
 }
 

@@ -52,9 +52,17 @@ export class PageNotificationService {
     if (newMentions.length === 0) return;
 
     const candidateUserIds = newMentions.map((m) => m.userId);
+    const coreAuthorized =
+      await this.notificationService.filterRecipientsWithCoreView(
+        candidateUserIds,
+        pageId,
+        workspaceId,
+      );
+    if (coreAuthorized.size === 0) return;
+
     const usersWithSpaceAccess =
       await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-        candidateUserIds,
+        [...coreAuthorized],
         spaceId,
       );
 
@@ -137,8 +145,19 @@ export class PageNotificationService {
 
     if (userIds.length === 0) return;
 
+    const coreAuthorized =
+      await this.notificationService.filterRecipientsWithCoreView(
+        userIds,
+        pageId,
+        workspaceId,
+      );
+    if (coreAuthorized.size === 0) return;
+
     const usersWithSpaceAccess =
-      await this.spaceMemberRepo.getUserIdsWithSpaceAccess(userIds, spaceId);
+      await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
+        [...coreAuthorized],
+        spaceId,
+      );
 
     if (usersWithSpaceAccess.size === 0) return;
 
@@ -190,7 +209,17 @@ export class PageNotificationService {
     const candidateIds = watcherIds.filter((id) => !actorSet.has(id));
     if (candidateIds.length === 0) return;
 
-    const eligibleUsers = await this.getEligiblePageUpdateUsers(candidateIds);
+    const coreAuthorized =
+      await this.notificationService.filterRecipientsWithCoreView(
+        candidateIds,
+        pageId,
+        workspaceId,
+      );
+    if (coreAuthorized.size === 0) return;
+
+    const eligibleUsers = await this.getEligiblePageUpdateUsers([
+      ...coreAuthorized,
+    ]);
     if (eligibleUsers.size === 0) return;
 
     const afterPrefs = [...eligibleUsers.keys()];
@@ -304,27 +333,38 @@ export class PageNotificationService {
   }
 
   async processDigest(userId: string, appUrl: string): Promise<void> {
-    const notificationIds = await this.rateLimiter.popDigest(userId);
+    const notificationIds = await this.rateLimiter.peekDigest(userId);
     if (notificationIds.length === 0) return;
 
-    const [user, notifications] = await Promise.all([
-      this.db
-        .selectFrom('users')
-        .select(['id', 'name'])
-        .where('id', '=', userId)
-        .executeTakeFirst(),
-      this.db
-        .selectFrom('notifications')
-        .select(['id', 'pageId', 'actorId'])
-        .where('id', 'in', notificationIds)
-        .execute(),
-    ]);
+    const notifications = await this.db
+      .selectFrom('notifications')
+      .select(['id', 'pageId', 'actorId', 'workspaceId'])
+      .where('id', 'in', notificationIds)
+      .where('userId', '=', userId)
+      .execute();
+    if (notifications.length === 0) return;
 
-    if (!user || notifications.length === 0) return;
+    const coreAuthorized = new Set<string>();
+    for (const notification of notifications) {
+      if (!notification.pageId) continue;
+      const allowed =
+        await this.notificationService.filterRecipientsWithCoreView(
+          [userId],
+          notification.pageId,
+          notification.workspaceId,
+        );
+      if (allowed.has(userId)) coreAuthorized.add(notification.pageId);
+    }
+    if (coreAuthorized.size === 0) return;
 
-    const pageIds = [
-      ...new Set(notifications.map((n) => n.pageId).filter(Boolean)),
-    ];
+    const user = await this.db
+      .selectFrom('users')
+      .select(['id', 'name'])
+      .where('id', '=', userId)
+      .executeTakeFirst();
+    if (!user) return;
+
+    const pageIds = [...coreAuthorized];
     const actorIds = [
       ...new Set(notifications.map((n) => n.actorId).filter(Boolean)),
     ];
@@ -370,13 +410,14 @@ export class PageNotificationService {
     const pages = spaceFilteredPages.filter((p) => accessiblePageIds.has(p.id));
     if (pages.length === 0) return;
 
-    const actors = actorIds.length > 0
-      ? await this.db
-          .selectFrom('users')
-          .select(['id', 'name'])
-          .where('id', 'in', actorIds)
-          .execute()
-      : [];
+    const actors =
+      actorIds.length > 0
+        ? await this.db
+            .selectFrom('users')
+            .select(['id', 'name'])
+            .where('id', 'in', actorIds)
+            .execute()
+        : [];
 
     const actorMap = new Map(actors.map((a) => [a.id, a.name]));
     const pageActors = new Map<string, Set<string>>();
@@ -394,6 +435,7 @@ export class PageNotificationService {
       updatedBy: [...(pageActors.get(p.id) ?? [])],
     }));
 
+    await this.rateLimiter.popDigest(userId);
     await this.notificationService.queueEmail(
       userId,
       notificationIds[0],

@@ -21,11 +21,13 @@ import { Node } from '@tiptap/pm/model';
 import { ShareRepo } from '@docmost/db/repos/share/share.repo';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { updateAttachmentAttr } from './share.util';
-import { Page } from '@docmost/db/types/entity.types';
+import { Page, User } from '@docmost/db/types/entity.types';
 import { validate as isValidUUID } from 'uuid';
 import { sql } from 'kysely';
 import { TransclusionService } from '../page/transclusion/transclusion.service';
 import { TransclusionLookup } from '../page/transclusion/transclusion.types';
+import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
+import { PaginationOptions } from '@docmost/db/pagination/pagination-options';
 
 @Injectable()
 export class ShareService {
@@ -38,11 +40,118 @@ export class ShareService {
     @InjectKysely() private readonly db: KyselyDB,
     private readonly tokenService: TokenService,
     private readonly transclusionService: TransclusionService,
+    private readonly authorization: LecAuthorizationService,
   ) {}
+
+  async getShares(user: User, pagination: PaginationOptions) {
+    const limit = pagination.limit;
+    const backwards = Boolean(pagination.beforeCursor && !pagination.cursor);
+    let cursor = pagination.cursor;
+    let beforeCursor = pagination.beforeCursor;
+    let exhausted = false;
+    let lastScannedCursor: string | undefined;
+    let authorized: Array<{
+      id: string;
+      pageId: string;
+      workspaceId: string;
+      $cursor: string;
+    }> = [];
+
+    for (let scanned = 0; scanned < 1000; scanned += 100) {
+      const batch = await this.shareRepo.findCandidates(
+        user.id,
+        user.workspaceId,
+        { limit: 100, cursor, beforeCursor } as PaginationOptions,
+      );
+      const candidates = batch.items;
+      if (candidates.length === 0) {
+        exhausted = true;
+        break;
+      }
+
+      const coreAllowed = await this.authorization.filterPages(
+        candidates.map((share) => ({
+          id: share.pageId,
+          workspaceId: share.workspaceId,
+        })),
+        user,
+      );
+      const accessibleIds =
+        await this.pagePermissionRepo.filterAccessiblePageIds({
+          pageIds: coreAllowed.map((page) => page.id),
+          userId: user.id,
+        });
+      const accessible = new Set(accessibleIds);
+      const allowed = candidates.filter((share) =>
+        accessible.has(share.pageId),
+      );
+      authorized = backwards
+        ? [...allowed, ...authorized]
+        : [...authorized, ...allowed];
+
+      if (backwards) {
+        lastScannedCursor = candidates[0].$cursor;
+        beforeCursor = lastScannedCursor;
+        exhausted = !batch.meta.hasNextPage;
+      } else {
+        lastScannedCursor = candidates[candidates.length - 1].$cursor;
+        cursor = batch.meta.nextCursor ?? undefined;
+        exhausted = !cursor;
+      }
+      if (authorized.length >= limit || exhausted) break;
+    }
+
+    const selected = backwards
+      ? authorized.slice(-limit)
+      : authorized.slice(0, limit);
+    const selectedIds = selected.map((share) => share.id);
+    const content = selectedIds.length
+      ? await this.shareRepo.findContentByIds(selectedIds, user.id)
+      : [];
+    const byId = new Map(content.map((share) => [share.id, share]));
+    const items = selectedIds.map((id) => byId.get(id)).filter(Boolean);
+    const hasMore = authorized.length > limit || !exhausted;
+    const firstCursor = selected[0]?.$cursor ?? lastScannedCursor ?? null;
+    const lastCursor =
+      selected[selected.length - 1]?.$cursor ?? lastScannedCursor ?? null;
+
+    return {
+      items,
+      meta: {
+        limit,
+        hasNextPage: backwards ? Boolean(pagination.beforeCursor) : hasMore,
+        hasPrevPage: backwards ? hasMore : Boolean(pagination.cursor),
+        nextCursor: backwards
+          ? pagination.beforeCursor
+            ? lastCursor
+            : null
+          : hasMore
+            ? lastCursor
+            : null,
+        prevCursor: backwards
+          ? hasMore
+            ? firstCursor
+            : null
+          : pagination.cursor
+            ? firstCursor
+            : null,
+      },
+    };
+  }
 
   async getShareTree(shareId: string, workspaceId: string) {
     const share = await this.shareRepo.findById(shareId);
     if (!share || share.workspaceId !== workspaceId) {
+      throw new NotFoundException('Share not found');
+    }
+
+    const candidates = share.includeSubPages
+      ? await this.pageRepo.findPageTreeCandidates(share.pageId)
+      : [await this.pageRepo.findAuthorizationSubject(share.pageId)].filter(
+          Boolean,
+        );
+    const allowed = await this.authorization.filterPages(candidates, null);
+    if (!allowed.some((page) => page.id === share.pageId)) {
       throw new NotFoundException('Share not found');
     }
 
@@ -57,7 +166,10 @@ export class ShareService {
       const pageTree =
         await this.pageRepo.getPageAndDescendantsExcludingRestricted(
           share.pageId,
-          { includeContent: false },
+          {
+            includeContent: false,
+            pageIds: allowed.map((page) => page.id),
+          },
         );
 
       return { share, pageTree };
@@ -69,7 +181,7 @@ export class ShareService {
   async createShare(opts: {
     authUserId: string;
     workspaceId: string;
-    page: Page;
+    page: Pick<Page, 'id' | 'spaceId'>;
     createShareDto: CreateShareDto;
   }) {
     const { authUserId, workspaceId, page, createShareDto } = opts;
@@ -118,8 +230,17 @@ export class ShareService {
     //TODO: we should resolve the page from the share id
     if (!dto.pageId) throw new NotFoundException('Shared page not found');
 
-    const share = await this.getShareForPage(dto.pageId, workspaceId);
+    const candidate = await this.pageRepo.findAuthorizationSubject(dto.pageId);
+    if (!candidate || candidate.workspaceId !== workspaceId) {
+      throw new NotFoundException('Shared page not found');
+    }
+    try {
+      await this.authorization.requirePage(candidate, null, 'VIEW');
+    } catch {
+      throw new NotFoundException('Shared page not found');
+    }
 
+    const share = await this.getShareForPage(dto.pageId, workspaceId);
     if (!share) {
       throw new NotFoundException('Shared page not found');
     }
@@ -149,6 +270,33 @@ export class ShareService {
     }
 
     return { page, share };
+  }
+
+  async getPublicShareInfo(shareId: string) {
+    const candidateShare = await this.shareRepo.findById(shareId);
+    if (!candidateShare) {
+      throw new NotFoundException('Share not found');
+    }
+
+    const candidate = await this.pageRepo.findAuthorizationSubject(
+      candidateShare.pageId,
+    );
+    if (!candidate || candidate.workspaceId !== candidateShare.workspaceId) {
+      throw new NotFoundException('Share not found');
+    }
+    try {
+      await this.authorization.requirePage(candidate, null, 'VIEW');
+    } catch {
+      throw new NotFoundException('Share not found');
+    }
+
+    const share = await this.shareRepo.findById(shareId, {
+      includeSharedPage: true,
+    });
+    if (!share) {
+      throw new NotFoundException('Share not found');
+    }
+    return share;
   }
 
   async getShareForPage(pageId: string, workspaceId: string) {
@@ -358,6 +506,15 @@ export class ShareService {
         const sourceShare = await this.getShareForPage(pageId, workspaceId);
         if (!sourceShare) return null;
         if (!(await isSharingAllowedFor(sourceShare.spaceId))) return null;
+        try {
+          await this.authorization.requirePage(
+            { id: pageId, workspaceId, deletedAt: null },
+            null,
+            'VIEW',
+          );
+        } catch {
+          return null;
+        }
         const restricted =
           await this.pagePermissionRepo.hasRestrictedAncestor(pageId);
         if (restricted) return null;

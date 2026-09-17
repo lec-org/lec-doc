@@ -11,17 +11,19 @@ export class MigrationService {
 
   constructor(@InjectKysely() private readonly db: KyselyDB) {}
 
-  async migrateToLatest(): Promise<void> {
-    const migrator = new Migrator({
-      db: this.db,
-      provider: new FileMigrationProvider({
-        fs,
-        path,
-        migrationFolder: path.join(__dirname, '..', 'migrations'),
-      }),
-    });
+  async assertUpToDate(): Promise<void> {
+    const pending = (await this.createMigrator().getMigrations()).filter(
+      (migration) => !migration.executedAt,
+    );
+    if (pending.length) {
+      throw new Error(
+        `Pending database migrations: ${pending.map(({ name }) => name).join(', ')}`,
+      );
+    }
+  }
 
-    const { error, results } = await migrator.migrateToLatest();
+  async migrateToLatest(): Promise<void> {
+    const { error, results } = await this.createMigrator().migrateToLatest();
 
     if (results && results.length === 0) {
       this.logger.log('No pending database migrations');
@@ -43,5 +45,16 @@ export class MigrationService {
       this.logger.error(error);
       process.exit(1);
     }
+  }
+
+  private createMigrator(): Migrator {
+    return new Migrator({
+      db: this.db,
+      provider: new FileMigrationProvider({
+        fs,
+        path,
+        migrationFolder: path.join(__dirname, '..', 'migrations'),
+      }),
+    });
   }
 }

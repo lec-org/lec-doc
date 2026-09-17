@@ -14,7 +14,6 @@ import { MailModule } from './integrations/mail/mail.module';
 import { QueueModule } from './integrations/queue/queue.module';
 import { StaticModule } from './integrations/static/static.module';
 import { EventEmitterModule } from '@nestjs/event-emitter';
-import { ScheduleModule } from '@nestjs/schedule';
 import { HealthModule } from './integrations/health/health.module';
 import { ExportModule } from './integrations/export/export.module';
 import { ImportModule } from './integrations/import/import.module';
@@ -30,6 +29,7 @@ import { NoopAuditModule } from './integrations/audit/audit.module';
 import { ThrottleModule } from './integrations/throttle/throttle.module';
 import { OutboundModule } from './integrations/outbound/outbound.module';
 import { EncryptionModule } from './integrations/encryption/encryption.module';
+import { RevocationModule } from './collaboration/revocation.module';
 
 @Module({
   imports: [
@@ -69,6 +69,7 @@ import { EncryptionModule } from './integrations/encryption/encryption.module';
       inject: [EnvironmentService],
     }),
     CollaborationModule,
+    RevocationModule,
     WsModule,
     QueueModule,
     StaticModule,
@@ -82,7 +83,6 @@ import { EncryptionModule } from './integrations/encryption/encryption.module';
       imports: [EnvironmentModule],
     }),
     EventEmitterModule.forRoot(),
-    ScheduleModule.forRoot(),
     SecurityModule,
     ThrottleModule,
     OutboundModule,

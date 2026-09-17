@@ -8,7 +8,7 @@ import { createReadStream } from 'node:fs';
 import { promises as fs } from 'fs';
 import { Readable } from 'stream';
 import { getMimeType, sanitizeFileName } from '../../../common/helpers';
-import { v7 } from 'uuid';
+import { v5 } from 'uuid';
 import { FileTask } from '@docmost/db/types/entity.types';
 import { getAttachmentFolderPath } from '../../../core/attachment/attachment.utils';
 import { AttachmentType } from '../../../core/attachment/attachment.constants';
@@ -122,7 +122,7 @@ export class ImportAttachmentService {
         const svgBuffer = await this.createDrawioSvg(drawioAbsPath, pngAbsPath);
 
         // Generate file details - always use "diagram.drawio.svg" as filename
-        const attachmentId = v7();
+        const attachmentId = v5(`drawio:${pageId}:${drawioHref}`, fileTask.id);
         const fileName = 'diagram.drawio.svg';
         const storageFilePath = `${getAttachmentFolderPath(
           AttachmentType.File,
@@ -156,6 +156,7 @@ export class ImportAttachmentService {
                 pageId,
                 spaceId: fileTask.spaceId,
               })
+              .onConflict((oc) => oc.column('id').doNothing())
               .execute();
 
             uploadStats.completed++;
@@ -205,7 +206,10 @@ export class ImportAttachmentService {
         const dir = path.posix.dirname(relPath);
         const aliasKey = `${dir}/${attachment.fileName}`;
         if (!attachmentCandidates.has(aliasKey)) {
-          attachmentCandidates.set(aliasKey, attachmentCandidates.get(relPath)!);
+          attachmentCandidates.set(
+            aliasKey,
+            attachmentCandidates.get(relPath)!,
+          );
           attachmentNameByRelPath.set(aliasKey, attachment.fileName);
         }
       }
@@ -213,7 +217,7 @@ export class ImportAttachmentService {
 
     const uploadOnce = (relPath: string) => {
       const abs = attachmentCandidates.get(relPath)!;
-      const attachmentId = v7();
+      const attachmentId = v5(`attachment:${pageId}:${relPath}`, fileTask.id);
 
       const realName = attachmentNameByRelPath.get(relPath);
       const baseName = realName || path.basename(abs);
@@ -373,9 +377,7 @@ export class ImportAttachmentService {
 
       const { attachmentId, apiFilePath } = processFile(relPath);
 
-      $aud
-        .attr('src', apiFilePath)
-        .attr('data-attachment-id', attachmentId);
+      $aud.attr('src', apiFilePath).attr('data-attachment-id', attachmentId);
 
       unwrapFromParagraph($, $aud);
     }
@@ -446,7 +448,15 @@ export class ImportAttachmentService {
       const { attachmentId, apiFilePath, abs } = processFile(relPath);
       const ext = path.extname(relPath).toLowerCase();
 
-      const audioExtensions = new Set(['.mp3', '.wav', '.ogg', '.m4a', '.webm', '.flac', '.aac']);
+      const audioExtensions = new Set([
+        '.mp3',
+        '.wav',
+        '.ogg',
+        '.m4a',
+        '.webm',
+        '.flac',
+        '.aac',
+      ]);
 
       if (ext === '.pdf') {
         const $pdf = $('<div>')
@@ -932,6 +942,7 @@ export class ImportAttachmentService {
             pageId,
             spaceId: fileTask.spaceId,
           })
+          .onConflict((oc) => oc.column('id').doNothing())
           .execute();
 
         uploadStats.completed++;

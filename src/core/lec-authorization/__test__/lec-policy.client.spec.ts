@@ -10,6 +10,15 @@ import { z } from 'zod';
 import { OutboundAgentFactory } from '../../../integrations/outbound/outbound-agent.factory';
 import { LecPolicyClient } from '../lec-policy.client';
 
+jest.mock('node:fs', () => ({
+  ...jest.requireActual('node:fs'),
+  readFileSync: jest.fn(
+    () =>
+      jest.requireActual<typeof import('node:tls')>('node:tls')
+        .rootCertificates[0],
+  ),
+}));
+
 const workspace = '01995ad0-1111-7111-8111-111111111111';
 const organization = '01995ad0-2222-7111-8111-111111111111';
 const page = '01995ad0-3333-7111-8111-111111111111';
@@ -34,6 +43,7 @@ describe('Core 在线 PDP 契约', () => {
       new ConfigService({
         LEC_CORE_URL: 'https://core.example.test',
         LEC_DOC_INTERNAL_TOKEN: 'd'.repeat(32),
+        LEC_INTERNAL_CA_FILE: '/run/secrets/lec-internal-ca.pem',
       }),
       {
         lease: async () => ({ dispatcher: agent, release: async () => {} }),
@@ -196,11 +206,7 @@ describe('Core 在线 PDP 契约', () => {
           JSON.stringify({ error: { code, message: 'upstream detail' } }),
           { headers: { 'content-type': 'application/json' } },
         );
-      const promise = client.send(
-        'doc-resources/reserve',
-        {},
-        z.unknown(),
-      );
+      const promise = client.send('doc-resources/reserve', {}, z.unknown());
       await expect(promise).rejects.toBeInstanceOf(ErrorType);
       await expect(promise).rejects.not.toThrow('upstream detail');
     },
@@ -208,20 +214,20 @@ describe('Core 在线 PDP 契约', () => {
 
   it('真实总截止时间覆盖迟到的 DNS lease，并在其最终返回后释放', async () => {
     let released!: () => void;
-    const releasedPromise = new Promise<void>((resolve) => (released = resolve));
+    const releasedPromise = new Promise<void>(
+      (resolve) => (released = resolve),
+    );
     const release = jest.fn(async () => released());
     client = new LecPolicyClient(
       new ConfigService({
         LEC_CORE_URL: 'https://core.example.test',
         LEC_DOC_INTERNAL_TOKEN: 'd'.repeat(32),
+        LEC_INTERNAL_CA_FILE: '/run/secrets/lec-internal-ca.pem',
       }),
       {
         lease: () =>
           new Promise((resolve) =>
-            setTimeout(
-              () => resolve({ dispatcher: agent, release }),
-              3250,
-            ),
+            setTimeout(() => resolve({ dispatcher: agent, release }), 3250),
           ),
       } as unknown as OutboundAgentFactory,
     );

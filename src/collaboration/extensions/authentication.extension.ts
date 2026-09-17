@@ -15,6 +15,21 @@ import { SpaceRole } from '../../common/helpers/types/permission';
 import { isUserDisabled } from '../../common/helpers';
 import { getPageId } from '../collaboration.util';
 import { JwtCollabPayload, JwtType } from '../../core/auth/dto/jwt-payload';
+import { LecAuthorizationService } from '../../core/lec-authorization/lec-authorization.service';
+import {
+  beforeHandleAwarenessPayload,
+  beforeHandleMessagePayload,
+  beforeSyncPayload,
+  onLoadDocumentPayload,
+} from '@hocuspocus/server';
+
+export type LecCollabContext = {
+  user: Awaited<ReturnType<UserRepo['findById']>>;
+  pageId: string;
+  workspaceId: string;
+  spaceId: string;
+  writeCapability: 'EDIT' | 'COMMENT';
+};
 
 @Injectable()
 export class AuthenticationExtension implements Extension {
@@ -26,6 +41,7 @@ export class AuthenticationExtension implements Extension {
     private pageRepo: PageRepo,
     private readonly spaceMemberRepo: SpaceMemberRepo,
     private readonly pagePermissionRepo: PagePermissionRepo,
+    private readonly authorization: LecAuthorizationService,
   ) {}
 
   async onAuthenticate(data: onAuthenticatePayload) {
@@ -71,6 +87,13 @@ export class AuthenticationExtension implements Extension {
       throw new UnauthorizedException();
     }
 
+    // Core decides all positive authorization; native ACLs only narrow it.
+    const [view, edit] = await this.authorization.page(page, user, [
+      'VIEW',
+      'EDIT',
+    ]);
+    if (!view?.allowed) throw new UnauthorizedException();
+
     // Check page-level permissions
     const { hasAnyRestriction, canAccess, canEdit } =
       await this.pagePermissionRepo.canUserEditPage(user.id, page.id);
@@ -97,14 +120,73 @@ export class AuthenticationExtension implements Extension {
       }
     }
 
-    if (page.deletedAt) {
-      data.connectionConfig.readOnly = true;
-    }
+    if (!edit?.allowed || page.deletedAt) data.connectionConfig.readOnly = true;
 
     this.logger.debug(`Authenticated user ${user.id} on page ${pageId}`);
 
     return {
       user,
-    };
+      pageId,
+      workspaceId,
+      spaceId: page.spaceId,
+      writeCapability: 'EDIT',
+    } satisfies LecCollabContext;
+  }
+
+  async onLoadDocument(data: onLoadDocumentPayload<LecCollabContext>) {
+    await this.require(data.context, 'VIEW');
+  }
+
+  async beforeHandleMessage(
+    data: beforeHandleMessagePayload<LecCollabContext>,
+  ) {
+    try {
+      await this.require(data.context, 'VIEW');
+      if (!data.connection.readOnly)
+        await this.require(data.context, data.context.writeCapability);
+    } catch (error) {
+      data.connection.close({ code: 4403, reason: 'authorization_revoked' });
+      throw error;
+    }
+  }
+
+  async beforeSync(data: beforeSyncPayload<LecCollabContext>) {
+    try {
+      await this.require(data.context, 'VIEW');
+      if (data.type !== 0 && !data.connection.readOnly)
+        await this.require(data.context, data.context.writeCapability);
+    } catch (error) {
+      data.connection.close({ code: 4403, reason: 'authorization_revoked' });
+      throw error;
+    }
+  }
+
+  async beforeHandleAwareness(
+    data: beforeHandleAwarenessPayload<LecCollabContext>,
+  ) {
+    if (!data.context) return;
+    try {
+      await this.require(data.context, 'VIEW');
+    } catch (error) {
+      data.connection?.close({ code: 4403, reason: 'authorization_revoked' });
+      throw error;
+    }
+  }
+
+  private async require(
+    context: LecCollabContext,
+    capability: 'VIEW' | 'EDIT' | 'COMMENT',
+  ) {
+    if (!context?.user || !context.pageId || !context.workspaceId)
+      throw new UnauthorizedException();
+    await this.authorization.requirePage(
+      {
+        id: context.pageId,
+        workspaceId: context.workspaceId,
+        deletedAt: null,
+      },
+      context.user,
+      capability,
+    );
   }
 }

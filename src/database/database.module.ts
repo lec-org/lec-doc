@@ -27,8 +27,8 @@ import { NotificationRepo } from '@docmost/db/repos/notification/notification.re
 import { WatcherRepo } from '@docmost/db/repos/watcher/watcher.repo';
 import { LabelRepo } from '@docmost/db/repos/label/label.repo';
 import { FavoriteRepo } from '@docmost/db/repos/favorite/favorite.repo';
+import { PageLikeRepo } from '@docmost/db/repos/page-like/page-like.repo';
 import { TemplateRepo } from '@docmost/db/repos/template/template.repo';
-import { PageListener } from '@docmost/db/listeners/page.listener';
 import { PostgresJSDialect } from 'kysely-postgres-js';
 import * as postgres from 'postgres';
 import { normalizePostgresUrl } from '../common/helpers';
@@ -84,6 +84,7 @@ import { normalizePostgresUrl } from '../common/helpers';
     PageHistoryRepo,
     CommentRepo,
     FavoriteRepo,
+    PageLikeRepo,
     AttachmentRepo,
     UserTokenRepo,
     UserSessionRepo,
@@ -94,9 +95,9 @@ import { normalizePostgresUrl } from '../common/helpers';
     WatcherRepo,
     LabelRepo,
     TemplateRepo,
-    PageListener,
   ],
   exports: [
+    MigrationService,
     WorkspaceRepo,
     UserRepo,
     GroupRepo,
@@ -110,6 +111,7 @@ import { normalizePostgresUrl } from '../common/helpers';
     PageHistoryRepo,
     CommentRepo,
     FavoriteRepo,
+    PageLikeRepo,
     AttachmentRepo,
     UserTokenRepo,
     UserSessionRepo,
@@ -133,9 +135,8 @@ export class DatabaseModule implements OnApplicationBootstrap {
 
   async onApplicationBootstrap() {
     await this.establishConnection();
-
     if (this.environmentService.getNodeEnv() === 'production') {
-      await this.migrationService.migrateToLatest();
+      await this.migrationService.assertUpToDate();
     }
   }
 

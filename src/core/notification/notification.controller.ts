@@ -10,7 +10,10 @@ import { NotificationService } from './notification.service';
 import { AuthUser } from '../../common/decorators/auth-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { User } from '@docmost/db/types/entity.types';
-import { ListNotificationsDto, MarkNotificationsReadDto } from './dto/notification.dto';
+import {
+  ListNotificationsDto,
+  MarkNotificationsReadDto,
+} from './dto/notification.dto';
 
 @UseGuards(JwtAuthGuard)
 @Controller('notifications')
@@ -23,13 +26,13 @@ export class NotificationController {
     @Body() dto: ListNotificationsDto,
     @AuthUser() user: User,
   ) {
-    return this.notificationService.findByUserId(user.id, dto, dto.type);
+    return this.notificationService.findByUserId(user, dto, dto.type);
   }
 
   @HttpCode(HttpStatus.OK)
   @Post('unread-count')
   async getUnreadCount(@AuthUser() user: User) {
-    const count = await this.notificationService.getUnreadCount(user.id);
+    const count = await this.notificationService.getUnreadCount(user);
     return { count };
   }
 
@@ -42,7 +45,7 @@ export class NotificationController {
     if (dto.notificationIds?.length) {
       await this.notificationService.markMultipleAsRead(
         dto.notificationIds,
-        user.id,
+        user,
       );
     }
   }
@@ -50,6 +53,6 @@ export class NotificationController {
   @HttpCode(HttpStatus.OK)
   @Post('mark-all-read')
   async markAllAsRead(@AuthUser() user: User) {
-    await this.notificationService.markAllAsRead(user.id);
+    await this.notificationService.markAllAsRead(user);
   }
 }

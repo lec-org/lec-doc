@@ -1,4 +1,8 @@
-import { Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Logger,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { QueueJob, QueueName } from '../constants';
@@ -15,6 +19,9 @@ import {
 } from '@docmost/db/repos/watcher/watcher.repo';
 import { InsertableWatcher } from '@docmost/db/types/entity.types';
 import { processBacklinks } from '../tasks/backlinks.task';
+import { PageRepo } from '@docmost/db/repos/page/page.repo';
+import { UserRepo } from '@docmost/db/repos/user/user.repo';
+import { LecAuthorizationService } from '../../../core/lec-authorization/lec-authorization.service';
 
 @Processor(QueueName.GENERAL_QUEUE)
 export class GeneralQueueProcessor
@@ -26,12 +33,22 @@ export class GeneralQueueProcessor
     @InjectKysely() private readonly db: KyselyDB,
     private readonly backlinkRepo: BacklinkRepo,
     private readonly watcherRepo: WatcherRepo,
+    private readonly pageRepo: PageRepo,
+    private readonly users: UserRepo,
+    private readonly authorization: LecAuthorizationService,
   ) {
     super();
   }
 
   async process(job: Job): Promise<void> {
     try {
+      if (
+        (job.name === QueueJob.ADD_PAGE_WATCHERS ||
+          job.name === QueueJob.PAGE_BACKLINKS) &&
+        !(await this.canEdit(job.data))
+      )
+        return;
+
       switch (job.name) {
         case QueueJob.ADD_PAGE_WATCHERS: {
           const { userIds, pageId, spaceId, workspaceId } =
@@ -59,6 +76,24 @@ export class GeneralQueueProcessor
       }
     } catch (err) {
       throw err;
+    }
+  }
+
+  private async canEdit(data: {
+    actorId: string;
+    pageId: string;
+    workspaceId: string;
+  }): Promise<boolean> {
+    if (!data.actorId) return false;
+    const page = await this.pageRepo.findAuthorizationSubject(data.pageId);
+    if (!page || page.workspaceId !== data.workspaceId) return false;
+    const user = await this.users.findById(data.actorId, data.workspaceId);
+    try {
+      await this.authorization.requirePage(page, user, 'EDIT');
+      return true;
+    } catch (error) {
+      if (error instanceof ForbiddenException) return false;
+      throw error;
     }
   }
 

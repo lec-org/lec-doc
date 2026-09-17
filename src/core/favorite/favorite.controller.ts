@@ -79,7 +79,7 @@ export class FavoriteController {
     @AuthWorkspace() workspace: Workspace,
   ) {
     return this.favoriteService.getFavoriteIds(
-      user.id,
+      user,
       workspace.id,
       dto.type as FavoriteType,
       dto.spaceId,
@@ -95,7 +95,7 @@ export class FavoriteController {
     @AuthWorkspace() workspace: Workspace,
   ) {
     return this.favoriteService.getUserFavorites(
-      user.id,
+      user,
       workspace.id,
       pagination,
       dto.type as FavoriteType | undefined,

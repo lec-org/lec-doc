@@ -8,6 +8,9 @@ import {
 import { setYjsMark, updateYjsMarkAttribute, YjsSelection } from './yjs.util';
 import * as Y from 'yjs';
 import { User } from '@docmost/db/types/entity.types';
+import { LecAuthorizationService } from '../core/lec-authorization/lec-authorization.service';
+import { LecCollabContext } from './extensions/authentication.extension';
+import { PageRepo } from '@docmost/db/repos/page/page.repo';
 
 export type CollabEventHandlers = ReturnType<
   CollaborationHandler['getHandlers']
@@ -17,7 +20,10 @@ export type CollabEventHandlers = ReturnType<
 export class CollaborationHandler {
   private readonly logger = new Logger(CollaborationHandler.name);
 
-  constructor() {}
+  constructor(
+    private readonly authorization: LecAuthorizationService,
+    private readonly pages: PageRepo,
+  ) {}
 
   getHandlers(hocuspocus: Hocuspocus) {
     return {
@@ -41,7 +47,7 @@ export class CollaborationHandler {
         await this.withYdocConnection(
           hocuspocus,
           documentName,
-          { user },
+          await this.context(documentName, user, 'COMMENT'),
           (doc) => {
             const fragment = doc.getXmlFragment('default');
             setYjsMark(doc, fragment, yjsSelection, 'comment', {
@@ -63,7 +69,7 @@ export class CollaborationHandler {
         await this.withYdocConnection(
           hocuspocus,
           documentName,
-          { user },
+          await this.context(documentName, user, 'COMMENT'),
           (doc) => {
             const fragment = doc.getXmlFragment('default');
             updateYjsMarkAttribute(
@@ -88,7 +94,7 @@ export class CollaborationHandler {
         await this.withYdocConnection(
           hocuspocus,
           documentName,
-          { user },
+          await this.context(documentName, user, 'EDIT'),
           (doc) => {
             const fragment = doc.getXmlFragment('default');
 
@@ -112,6 +118,24 @@ export class CollaborationHandler {
           },
         );
       },
+    };
+  }
+
+  private async context(
+    documentName: string,
+    user: User,
+    writeCapability: 'EDIT' | 'COMMENT',
+  ): Promise<LecCollabContext> {
+    const pageId = documentName.split('.')[1];
+    const page = await this.pages.findById(pageId);
+    if (!page) throw new Error('Page not found');
+    await this.authorization.requirePage(page, user, writeCapability);
+    return {
+      user,
+      pageId,
+      workspaceId: page.workspaceId,
+      spaceId: page.spaceId,
+      writeCapability,
     };
   }
 

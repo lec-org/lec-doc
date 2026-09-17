@@ -1,6 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import { Injectable } from '@nestjs/common';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB, KyselyTransaction } from '@docmost/db/types/kysely.types';
 import { dbOrTx } from '@docmost/db/utils';
@@ -19,11 +17,7 @@ import {
   executeWithCursorPagination,
 } from '@docmost/db/pagination/cursor-pagination';
 import { PagePermissionMember } from './types/page-permission.types';
-import { withCache } from '../../../common/helpers/with-cache';
-import {
-  CacheKey,
-  PERMISSION_CACHE_TTL_MS,
-} from '../../../common/helpers/cache-keys';
+
 
 export { PagePermissionMember } from './types/page-permission.types';
 
@@ -32,7 +26,6 @@ export class PagePermissionRepo {
   constructor(
     @InjectKysely() private readonly db: KyselyDB,
     private readonly groupRepo: GroupRepo,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   async findPageAccessByPageId(
@@ -388,12 +381,7 @@ export class PagePermissionRepo {
     canAccess: boolean;
     canEdit: boolean;
   }> {
-    return withCache(
-      this.cacheManager,
-      CacheKey.PAGE_CAN_EDIT(userId, pageId),
-      PERMISSION_CACHE_TTL_MS,
-      async () => {
-        const result = await sql<{
+    const result = await sql<{
           canAccess: boolean | null;
           canEdit: boolean | null;
         }>`
@@ -419,19 +407,17 @@ export class PagePermissionRepo {
                 SELECT gu.group_id FROM group_users gu WHERE gu.user_id = ${userId}::uuid
               )
             )
-        `.execute(this.db);
+    `.execute(this.db);
 
-        const row = result.rows[0];
-        if (!row || row.canAccess === null) {
-          return { hasAnyRestriction: false, canAccess: true, canEdit: true };
-        }
-        return {
-          hasAnyRestriction: true,
-          canAccess: row.canAccess,
-          canEdit: row.canAccess && (row.canEdit ?? false),
-        };
-      },
-    );
+    const row = result.rows[0];
+    if (!row || row.canAccess === null) {
+      return { hasAnyRestriction: false, canAccess: true, canEdit: true };
+    }
+    return {
+      hasAnyRestriction: true,
+      canAccess: row.canAccess,
+      canEdit: row.canAccess && (row.canEdit ?? false),
+    };
   }
 
   /**

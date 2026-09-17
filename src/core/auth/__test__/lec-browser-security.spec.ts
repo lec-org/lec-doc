@@ -22,6 +22,7 @@ describe('浏览器请求边界', () => {
     security.install(app);
     await app.register(fastifyCookie);
     app.post('/change', () => ({ writes: ++writes }));
+    app.post('/api/internal/core/revocations', () => ({ writes: ++writes }));
     app.get('/read', () => ({ ok: true }));
   });
   afterEach(async () => {
@@ -48,13 +49,22 @@ describe('浏览器请求边界', () => {
     expect(writes).toBe(1);
   });
 
+  it('服务间撤权 POST 没有浏览器 Origin 也能到达 bearer 认证控制器', async () => {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/internal/core/revocations',
+    });
+    expect(response.statusCode).toBe(200);
+    expect(writes).toBe(1);
+  });
+
   it.each([
     undefined,
     'null',
     'https://doc.example.test.evil',
     'https://doc.example.test:444',
     'https://doc.example.test/',
-  ])('写请求拒绝 Origin %s，处理器不执行', async (origin) => {
+  ])('浏览器写请求拒绝 Origin %s，处理器不执行', async (origin) => {
     const csrf = security.issueCsrf('session-a');
     const response = await app.inject({
       method: 'POST',

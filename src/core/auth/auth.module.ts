@@ -9,16 +9,23 @@ import { LecOidcClient } from './lec-oidc.client';
 import { LecOidcTransactions } from './lec-oidc-transactions';
 import { LecIdentityModule } from './lec-identity.module';
 import { LecOidcController } from './lec-oidc.controller';
+import { LecDesktopHandoffController } from './lec-desktop-handoff.controller';
+import { LecDesktopHandoffService } from './lec-desktop-handoff.service';
 
 @Module({
   imports: [TokenModule, WorkspaceModule, LecIdentityModule],
-  controllers: [AuthController, LecOidcController],
+  controllers: [
+    AuthController,
+    LecOidcController,
+    LecDesktopHandoffController,
+  ],
   providers: [
     AuthService,
     SignupService,
     JwtStrategy,
     LecOidcClient,
     LecOidcTransactions,
+    LecDesktopHandoffService,
   ],
   exports: [SignupService],
 })

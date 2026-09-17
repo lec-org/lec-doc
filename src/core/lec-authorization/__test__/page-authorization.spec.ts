@@ -48,15 +48,19 @@ describe('页面共享授权入口', () => {
     );
   });
   it.each([
-    'validateCanView',
-    'validateCanEdit',
-    'validateCanViewWithPermissions',
-    'validateCanComment',
-  ] as const)('%s 不因本地 Owner/CASL allow 绕过 Core 故障', async (method) => {
+    ['validateCanView', () => access.validateCanView(page, user)],
+    ['validateCanEdit', () => access.validateCanEdit(page, user)],
+    [
+      'validateCanViewWithPermissions',
+      () => access.validateCanViewWithPermissions(page, user),
+    ],
+    [
+      'validateCanComment',
+      () => access.validateCanComment(page, user, page.workspaceId),
+    ],
+  ])('%s 不因本地 Owner/CASL allow 绕过 Core 故障', async (_method, invoke) => {
     policy.authorize.mockRejectedValue(new ServiceUnavailableException());
-    await expect(
-      access[method](page, user, page.workspaceId),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(invoke()).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(permissions.canUserEditPage).not.toHaveBeenCalled();
   });
   it('VIEW grant 不升级 canEdit', async () => {
@@ -118,6 +122,28 @@ describe('页面共享授权入口', () => {
         'DELETE',
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+  it('列表按 Core 上限分批并保持原顺序，只返回在线允许页面', async () => {
+    const pages = Array.from({ length: 101 }, (_, index) => ({
+      id: `page-${index}`,
+      workspaceId: 'workspace',
+    }));
+    policy.authorize
+      .mockResolvedValueOnce(
+        pages.slice(0, 100).map((candidate, index) => ({
+          resource_id: candidate.id,
+          allowed: index % 2 === 0,
+        })),
+      )
+      .mockResolvedValueOnce([
+        { resource_id: pages[100].id, allowed: true },
+      ]);
+    const allowed = await authorization.filterPages(pages as any, user);
+    expect(policy.authorize).toHaveBeenCalledTimes(2);
+    expect(allowed.map((candidate) => candidate.id)).toEqual([
+      ...pages.slice(0, 100).filter((_, index) => index % 2 === 0),
+      pages[100],
+    ].map((candidate) => candidate.id));
   });
   it('本地限制可以进一步收紧 Core allow', async () => {
     policy.authorize.mockResolvedValue([{ allowed: true }]);

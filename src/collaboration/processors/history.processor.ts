@@ -1,4 +1,8 @@
-import { Logger, OnModuleDestroy } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Logger,
+  OnModuleDestroy,
+} from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Job, Queue } from 'bullmq';
@@ -19,6 +23,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { CollabHistoryService } from '../services/collab-history.service';
 import { WatcherService } from '../../core/watcher/watcher.service';
 import { isEmptyParagraphDoc } from '../collaboration.util';
+import { UserRepo } from '@docmost/db/repos/user/user.repo';
+import { LecAuthorizationService } from '../../core/lec-authorization/lec-authorization.service';
 
 @Processor(QueueName.HISTORY_QUEUE)
 export class HistoryProcessor extends WorkerHost implements OnModuleDestroy {
@@ -31,6 +37,8 @@ export class HistoryProcessor extends WorkerHost implements OnModuleDestroy {
     private readonly watcherService: WatcherService,
     @InjectQueue(QueueName.NOTIFICATION_QUEUE) private notificationQueue: Queue,
     @InjectQueue(QueueName.GENERAL_QUEUE) private generalQueue: Queue,
+    private readonly users: UserRepo,
+    private readonly authorization: LecAuthorizationService,
   ) {
     super();
   }
@@ -39,17 +47,29 @@ export class HistoryProcessor extends WorkerHost implements OnModuleDestroy {
     if (job.name !== QueueJob.PAGE_HISTORY) return;
 
     try {
-      const { pageId } = job.data;
+      const { pageId, actorId } = job.data;
+      if (!actorId) return;
 
-      const page = await this.pageRepo.findById(pageId, {
-        includeContent: true,
-      });
+      const pageRef = await this.pageRepo.findAuthorizationSubject(pageId);
 
-      if (!page) {
+      if (!pageRef) {
         this.logger.warn(`Page ${pageId} not found, skipping history`);
         await this.collabHistory.clearContributors(pageId);
         return;
       }
+
+      const user = await this.users.findById(actorId, pageRef.workspaceId);
+      try {
+        await this.authorization.requirePage(pageRef, user, 'EDIT');
+      } catch (error) {
+        if (error instanceof ForbiddenException) return;
+        throw error;
+      }
+
+      const page = await this.pageRepo.findById(pageId, {
+        includeContent: true,
+      });
+      if (!page) return;
 
       const lastHistory = await this.pageHistoryRepo.findPageLastHistory(
         pageId,
@@ -91,6 +111,7 @@ export class HistoryProcessor extends WorkerHost implements OnModuleDestroy {
 
         await this.generalQueue
           .add(QueueJob.PAGE_BACKLINKS, {
+            actorId,
             pageId,
             workspaceId: page.workspaceId,
             mentions: pageMentions,

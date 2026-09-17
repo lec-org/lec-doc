@@ -45,12 +45,7 @@ export class LabelController {
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
   ) {
-    return this.labelService.getLabels(
-      workspace.id,
-      user.id,
-      dto.type,
-      pagination,
-    );
+    return this.labelService.getLabels(user, dto.type, pagination);
   }
 
   @HttpCode(HttpStatus.OK)
@@ -70,48 +65,64 @@ export class LabelController {
       if (!dto.name) {
         throw new BadRequestException('labelId or name is required');
       }
-      const label = await this.labelRepo.findByNameAndWorkspace(
+      const label = await this.labelRepo.findIdByNameAndWorkspace(
         dto.name,
         workspace.id,
         LabelType.PAGE,
       );
-      if (!label) {
+      if (
+        !label ||
+        !(await this.labelService.hasAuthorizedPages(
+          label.id,
+          user,
+          dto.spaceId,
+        ))
+      ) {
         return emptyCursorPaginationResult(pagination.limit);
       }
       labelId = label.id;
     } else {
-      const label = await this.labelRepo.findById(labelId);
-      if (!label) {
+      const label = await this.labelRepo.findByIdAndWorkspace(
+        labelId,
+        workspace.id,
+      );
+      if (
+        !label ||
+        !(await this.labelService.hasAuthorizedPages(
+          label.id,
+          user,
+          dto.spaceId,
+        ))
+      ) {
         throw new NotFoundException('Label not found');
       }
     }
 
-    return this.labelService.findPagesByLabel(labelId, user.id, {
+    return this.labelService.findPagesByLabel(labelId, user, {
       spaceId: dto.spaceId,
       query: pagination.query,
       pagination,
     });
   }
 
-  // @HttpCode(HttpStatus.OK)
-  // @Post('info')
-  // async getLabelInfo(
-  //   @Body() dto: LabelInfoDto,
-  //   @AuthUser() user: User,
-  //   @AuthWorkspace() workspace: Workspace,
-  // ) {
-  //   if (dto.spaceId) {
-  //     await this.assertCanReadSpace(user, dto.spaceId);
-  //   }
-  //
-  //   return this.labelService.getLabelInfo(
-  //     dto.name,
-  //     dto.type,
-  //     workspace.id,
-  //     user.id,
-  //     dto.spaceId,
-  //   );
-  // }
+  @HttpCode(HttpStatus.OK)
+  @Post('info')
+  async getLabelInfo(
+    @Body() dto: LabelInfoDto,
+    @AuthUser() user: User,
+    @AuthWorkspace() _workspace: Workspace,
+  ) {
+    if (dto.spaceId) {
+      await this.assertCanReadSpace(user, dto.spaceId);
+    }
+
+    return this.labelService.getLabelInfo(
+      dto.name,
+      dto.type,
+      user,
+      dto.spaceId,
+    );
+  }
 
   private async assertCanReadSpace(user: User, spaceId: string) {
     const ability = await this.spaceAbility.createForUser(user, spaceId);

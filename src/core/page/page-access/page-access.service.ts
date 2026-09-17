@@ -19,7 +19,10 @@ export class PageAccessService {
   ) {}
 
   // 本地 Space/CASL/PagePermission 只收紧 Core 已允许的能力，不产生独立 allow。
-  private async localPermissions(page: Page, user: User) {
+  private async localPermissions(
+    page: Pick<Page, 'id' | 'spaceId'>,
+    user: User,
+  ) {
     const ability = await this.spaceAbility.createForUser(user, page.spaceId);
     if (!ability.can(SpaceCaslAction.Read, SpaceCaslSubject.Page))
       throw new ForbiddenException();
@@ -34,7 +37,10 @@ export class PageAccessService {
     };
   }
 
-  async validateCanView(page: Page, user: User): Promise<void> {
+  async validateCanView(
+    page: Pick<Page, 'id' | 'workspaceId' | 'deletedAt' | 'spaceId'>,
+    user: User,
+  ): Promise<void> {
     await this.lec.requirePage(page, user, 'VIEW');
     await this.localPermissions(page, user);
   }
@@ -50,10 +56,11 @@ export class PageAccessService {
   }
 
   async validateCanEdit(
-    page: Page,
+    page: Pick<Page, 'id' | 'workspaceId' | 'deletedAt' | 'spaceId'>,
     user: User,
+    requireCore: boolean = true,
   ): Promise<{ hasRestriction: boolean }> {
-    await this.lec.requirePage(page, user, 'EDIT');
+    if (requireCore) await this.lec.requirePage(page, user, 'EDIT');
     const local = await this.localPermissions(page, user);
     if (!local.canEdit) throw new ForbiddenException();
     return { hasRestriction: local.hasRestriction };

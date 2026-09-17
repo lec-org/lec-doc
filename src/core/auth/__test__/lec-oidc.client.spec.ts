@@ -4,6 +4,15 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { OutboundAgentFactory } from '../../../integrations/outbound/outbound-agent.factory';
 import { LecOidcClient } from '../lec-oidc.client';
 
+jest.mock('node:fs', () => ({
+  ...jest.requireActual('node:fs'),
+  readFileSync: jest.fn(
+    () =>
+      jest.requireActual<typeof import('node:tls')>('node:tls')
+        .rootCertificates[0],
+  ),
+}));
+
 const issuer = 'https://sso.example.test/realms/lec';
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = {
@@ -23,6 +32,7 @@ const metadata = {
   authorization_endpoint: `${issuer}/auth`,
   token_endpoint: `${issuer}/token`,
   jwks_uri: `${issuer}/certs`,
+  userinfo_endpoint: `${issuer}/userinfo`,
   response_types_supported: ['code'],
   subject_types_supported: ['public'],
   id_token_signing_alg_values_supported: ['RS256'],
@@ -53,6 +63,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
         LEC_DOC_OIDC_ISSUER: issuer,
         LEC_DOC_CLIENT_SECRET: 'test-client-secret',
         APP_URL: 'https://doc.example.test',
+        LEC_INTERNAL_CA_FILE: '/run/secrets/lec-internal-ca.pem',
       }),
       factory as unknown as OutboundAgentFactory,
     );
@@ -77,6 +88,29 @@ describe('LecSSO OIDC 浏览器协议', () => {
     expect(result.transaction.verifier.length).toBeGreaterThanOrEqual(43);
     expect(result.url).not.toContain(result.transaction.verifier);
     expect(result.url).not.toContain('test-client-secret');
+  });
+
+  it('Desktop access token 仅经同源 userinfo 换取稳定主体', async () => {
+    agent
+      .get('https://sso.example.test')
+      .intercept({
+        path: '/realms/lec/userinfo',
+        headers: { authorization: 'Bearer desktop-access-token' },
+      })
+      .reply(200, {
+        sub: 'desktop-subject',
+        email: 'desktop@example.test',
+        email_verified: true,
+        name: 'Desktop User',
+      });
+    await expect(
+      client.identityFromAccessToken('desktop-access-token'),
+    ).resolves.toEqual({
+      issuer,
+      subject: 'desktop-subject',
+      email: 'desktop@example.test',
+      name: 'Desktop User',
+    });
   });
 
   it('回调通过签名和 claims 校验后返回稳定主体，不返回 access token', async () => {

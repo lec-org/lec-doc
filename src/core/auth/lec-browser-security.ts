@@ -55,9 +55,13 @@ export class LecBrowserSecurity {
     // 在 Cookie 解析前拒绝跨 Origin；安全方法允许普通浏览器导航不携带 Origin。
     app.addHook('onRequest', async (request, reply) => {
       try {
+        const internalRevocation =
+          request.method === 'POST' &&
+          request.url.split('?', 1)[0] === '/api/internal/core/revocations';
         this.assertOrigin(
           request.headers.origin,
-          !['GET', 'HEAD', 'OPTIONS'].includes(request.method),
+          !internalRevocation &&
+            !['GET', 'HEAD', 'OPTIONS'].includes(request.method),
         );
       } catch {
         return reply.code(403).send({ message: '请求来源不受信任' });

@@ -44,7 +44,10 @@ export class FileTaskProcessor extends WorkerHost implements OnModuleDestroy {
         : `Error processing ${job.name} job. Reason: ${job.failedReason}`,
     );
 
-    if (job.name === QueueJob.IMPORT_TASK) {
+    if (
+      job.name === QueueJob.IMPORT_TASK &&
+      job.attemptsMade >= (job.opts.attempts ?? 1)
+    ) {
       await this.handleFailedImportJob(job);
     }
   }

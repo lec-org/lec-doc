@@ -54,9 +54,7 @@ export class ExportController {
     @AuthUser() user: User,
     @Res() res: FastifyReply,
   ) {
-    const page = await this.pageRepo.findById(dto.pageId, {
-      includeContent: true,
-    });
+    const page = await this.pageRepo.findAuthorizationSubject(dto.pageId);
 
     if (!page || page.deletedAt) {
       throw new NotFoundException('Page not found');
@@ -69,7 +67,7 @@ export class ExportController {
       dto.format,
       dto.includeAttachments,
       dto.includeChildren,
-      user.id,
+      user,
     );
 
     this.auditService.log({
@@ -78,7 +76,7 @@ export class ExportController {
       resourceId: page.id,
       spaceId: page.spaceId,
       metadata: {
-        title: getPageTitle(page.title),
+        title: getPageTitle(result.page.title),
         format: dto.format,
         includeChildren: dto.includeChildren,
         includeAttachments: dto.includeAttachments,
@@ -89,7 +87,7 @@ export class ExportController {
     if (result.type === 'file') {
       const ext = getExportExtension(dto.format);
       const fileName =
-        sanitizeFileName(page.title || 'untitled', { preserveSpaces: true }) +
+        sanitizeFileName(result.page.title || 'untitled', { preserveSpaces: true }) +
         ext;
       const contentType = getMimeType(path.extname(fileName));
 
@@ -102,7 +100,7 @@ export class ExportController {
       res.send(result.content);
     } else {
       const fileName =
-        sanitizeFileName(page.title || 'untitled', { preserveSpaces: true }) +
+        sanitizeFileName(result.page.title || 'untitled', { preserveSpaces: true }) +
         '.zip';
 
       res.headers({
@@ -132,7 +130,7 @@ export class ExportController {
       dto.spaceId,
       dto.format,
       dto.includeAttachments,
-      user.id,
+      user,
     );
 
     this.auditService.log({

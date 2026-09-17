@@ -3,11 +3,15 @@ import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { AttachmentService } from '../services/attachment.service';
 import { QueueJob, QueueName } from 'src/integrations/queue/constants';
+import { LecResourceLifecycleService } from '../../lec-authorization/lec-resource-lifecycle.service';
 
 @Processor(QueueName.ATTACHMENT_QUEUE)
 export class AttachmentProcessor extends WorkerHost implements OnModuleDestroy {
   private readonly logger = new Logger(AttachmentProcessor.name);
-  constructor(private readonly attachmentService: AttachmentService) {
+  constructor(
+    private readonly attachmentService: AttachmentService,
+    private readonly lifecycle: LecResourceLifecycleService,
+  ) {
     super();
   }
 
@@ -20,6 +24,10 @@ export class AttachmentProcessor extends WorkerHost implements OnModuleDestroy {
         await this.attachmentService.handleDeleteUserAvatars(job.data.id);
       }
       if (job.name === QueueJob.DELETE_PAGE_ATTACHMENTS) {
+        await this.lifecycle.requireDeletedTree(
+          job.data.workspaceId,
+          job.data.rootPageId,
+        );
         await this.attachmentService.handleDeletePageAttachments(
           job.data.pageId,
         );

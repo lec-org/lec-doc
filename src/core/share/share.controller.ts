@@ -55,7 +55,7 @@ export class ShareController {
     @AuthUser() user: User,
     @Body() pagination: PaginationOptions,
   ) {
-    return this.shareRepo.getShares(user.id, pagination);
+    return this.shareService.getShares(user, pagination);
   }
 
   @Public()
@@ -92,13 +92,7 @@ export class ShareController {
   @HttpCode(HttpStatus.OK)
   @Post('/info')
   async getShare(@Body() dto: ShareIdDto) {
-    const share = await this.shareRepo.findById(dto.shareId, {
-      includeSharedPage: true,
-    });
-
-    if (!share) {
-      throw new NotFoundException('Share not found');
-    }
+    const share = await this.shareService.getPublicShareInfo(dto.shareId);
 
     const sharingAllowed = await this.shareService.isSharingAllowed(
       share.workspaceId,
@@ -132,8 +126,8 @@ export class ShareController {
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
   ) {
-    const page = await this.pageRepo.findById(dto.pageId);
-    if (!page) {
+    const page = await this.pageRepo.findAccessSubject(dto.pageId);
+    if (!page || page.workspaceId !== workspace.id) {
       throw new NotFoundException('Shared page not found');
     }
 
@@ -149,7 +143,7 @@ export class ShareController {
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
   ) {
-    const page = await this.pageRepo.findById(createShareDto.pageId);
+    const page = await this.pageRepo.findAccessSubject(createShareDto.pageId);
 
     if (!page || workspace.id !== page.workspaceId) {
       throw new NotFoundException('Page not found');
@@ -200,51 +194,43 @@ export class ShareController {
   @HttpCode(HttpStatus.OK)
   @Post('update')
   async update(@Body() updateShareDto: UpdateShareDto, @AuthUser() user: User) {
-    const share = await this.shareRepo.findById(updateShareDto.shareId);
-
-    if (!share) {
-      throw new NotFoundException('Share not found');
-    }
-
-    const page = await this.pageRepo.findById(share.pageId);
+    const page = await this.shareRepo.findAuthorizationSubject(
+      updateShareDto.shareId,
+    );
     if (!page) {
-      throw new NotFoundException('Page not found');
+      throw new NotFoundException('Share not found');
     }
 
     // User must be able to edit the page to update its share
     await this.pageAccessService.validateCanEdit(page, user);
 
-    return this.shareService.updateShare(share.id, updateShareDto);
+    return this.shareService.updateShare(page.shareId, updateShareDto);
   }
 
   @HttpCode(HttpStatus.OK)
   @Post('delete')
   async delete(@Body() shareIdDto: ShareIdDto, @AuthUser() user: User) {
-    const share = await this.shareRepo.findById(shareIdDto.shareId);
-
-    if (!share) {
-      throw new NotFoundException('Share not found');
-    }
-
-    const page = await this.pageRepo.findById(share.pageId);
+    const page = await this.shareRepo.findAuthorizationSubject(
+      shareIdDto.shareId,
+    );
     if (!page) {
-      throw new NotFoundException('Page not found');
+      throw new NotFoundException('Share not found');
     }
 
     // User must be able to edit the page to delete its share
     await this.pageAccessService.validateCanEdit(page, user);
 
-    await this.shareRepo.deleteShare(share.id);
+    await this.shareRepo.deleteShare(page.shareId);
 
     this.auditService.log({
       event: AuditEvent.SHARE_DELETED,
       resourceType: AuditResource.SHARE,
-      resourceId: share.id,
-      spaceId: share.spaceId,
+      resourceId: page.shareId,
+      spaceId: page.spaceId,
       changes: {
         before: {
-          pageId: share.pageId,
-          spaceId: share.spaceId,
+          pageId: page.id,
+          spaceId: page.spaceId,
         },
       },
     });

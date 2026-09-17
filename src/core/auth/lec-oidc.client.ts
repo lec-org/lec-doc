@@ -4,6 +4,7 @@ import { isEmail } from 'class-validator';
 import * as oidc from 'openid-client';
 import { fetch } from 'undici';
 import { OutboundAgentFactory } from '../../integrations/outbound/outbound-agent.factory';
+import { loadInternalCa } from '../../integrations/outbound/internal-ca';
 
 export type LecOidcTransaction = {
   state: string;
@@ -20,10 +21,16 @@ export type LecOidcPrincipal = {
 /** 只处理 LecSSO 协议；一次性事务和本地会话由认证服务持有。 */
 @Injectable()
 export class LecOidcClient {
+  private readonly caCert: string;
+
   constructor(
     private readonly config: ConfigService,
     private readonly agents: OutboundAgentFactory,
-  ) {}
+  ) {
+    this.caCert = loadInternalCa(
+      this.config.getOrThrow<string>('LEC_INTERNAL_CA_FILE'),
+    );
+  }
 
   private get issuer(): URL {
     return this.httpsUrl(this.config.getOrThrow<string>('LEC_DOC_OIDC_ISSUER'));
@@ -68,7 +75,9 @@ export class LecOidcClient {
           const url = this.httpsUrl(String(input));
           if (url.origin !== issuer.origin)
             throw new Error('OIDC endpoint origin 不匹配');
-          const lease = await this.agents.lease(url.href);
+          const lease = await this.agents.lease(url.href, {
+            caCert: this.caCert,
+          });
           try {
             const response = await fetch(url, {
               ...init,
@@ -106,6 +115,42 @@ export class LecOidcClient {
       throw new Error('LecSSO 必须支持 PKCE S256');
     }
     return configuration;
+  }
+
+  async identityFromAccessToken(
+    accessToken: string,
+  ): Promise<LecOidcPrincipal> {
+    if (!accessToken || accessToken.length > 8192)
+      throw new UnauthorizedException('访问令牌无效');
+    const config = await this.configuration();
+    const metadata = config.serverMetadata();
+    if (
+      !metadata.userinfo_endpoint ||
+      this.httpsUrl(metadata.userinfo_endpoint).origin !== this.issuer.origin
+    )
+      throw new UnauthorizedException('LecSSO userinfo endpoint 无效');
+    const profile = await oidc.fetchUserInfo(
+      config,
+      accessToken,
+      oidc.skipSubjectCheck,
+    );
+    if (
+      !profile.sub ||
+      profile.sub.length > 255 ||
+      profile.email_verified !== true ||
+      typeof profile.email !== 'string' ||
+      !isEmail(profile.email)
+    )
+      throw new UnauthorizedException('登录身份或已验证邮箱无效');
+    return {
+      issuer: this.issuer.href,
+      subject: profile.sub,
+      email: profile.email.toLowerCase(),
+      name:
+        typeof profile.name === 'string' && profile.name.trim()
+          ? profile.name.slice(0, 255)
+          : profile.email,
+    };
   }
 
   async begin(): Promise<{ url: string; transaction: LecOidcTransaction }> {

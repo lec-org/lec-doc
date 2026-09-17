@@ -24,21 +24,18 @@ export class TransclusionController {
   async lookup(@Body() dto: LookupDto, @AuthUser() user: User) {
     return this.transclusionService.lookup(
       dto.references,
-      user.id,
+      user,
       user.workspaceId,
     );
   }
 
   @HttpCode(HttpStatus.OK)
   @Post('references')
-  async references(
-    @Body() dto: ReferencesDto,
-    @AuthUser() user: User,
-  ) {
+  async references(@Body() dto: ReferencesDto, @AuthUser() user: User) {
     return this.transclusionService.listReferences({
       sourcePageId: dto.sourcePageId,
       transclusionId: dto.transclusionId,
-      viewerUserId: user.id,
+      viewer: user,
       workspaceId: user.workspaceId,
     });
   }

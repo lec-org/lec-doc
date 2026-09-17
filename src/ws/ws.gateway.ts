@@ -14,6 +14,8 @@ import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
 import { WsService } from './ws.service';
 import { getSpaceRoomName, getUserRoomName } from './ws.utils';
 import * as cookie from 'cookie';
+import { UserRepo } from '@docmost/db/repos/user/user.repo';
+import { LecAuthorizationService } from '../core/lec-authorization/lec-authorization.service';
 
 @WebSocketGateway({
   transports: ['websocket'],
@@ -31,6 +33,8 @@ export class WsGateway
   constructor(
     private tokenService: TokenService,
     private spaceMemberRepo: SpaceMemberRepo,
+    private userRepo: UserRepo,
+    private authorization: LecAuthorizationService,
     private wsService: WsService,
   ) {}
 
@@ -49,14 +53,31 @@ export class WsGateway
       const userId = token.sub;
       const workspaceId = token.workspaceId;
 
+      const user = await this.userRepo.findById(userId, workspaceId);
+      if (!user) throw new Error('user unavailable');
       client.data.userId = userId;
       client.data.workspaceId = workspaceId;
+      client.data.user = user;
 
-      const userSpaceIds = await this.spaceMemberRepo.getUserSpaceIds(userId);
+      const candidateSpaceIds = await this.spaceMemberRepo.getUserSpaceIds(userId);
+      const allowedSpaceIds: string[] = [];
+      for (const spaceId of candidateSpaceIds) {
+        try {
+          await this.authorization.requireSpace(
+            spaceId,
+            workspaceId,
+            user,
+            'VIEW',
+          );
+          allowedSpaceIds.push(spaceId);
+        } catch {
+          // Core is the only allow source; denied/unavailable spaces are omitted.
+        }
+      }
 
       const userRoom = getUserRoomName(userId);
       const workspaceRoom = `workspace-${workspaceId}`;
-      const spaceRooms = userSpaceIds.map((id) => getSpaceRoomName(id));
+      const spaceRooms = allowedSpaceIds.map((id) => getSpaceRoomName(id));
 
       client.join([userRoom, workspaceRoom, ...spaceRooms]);
     } catch (err) {

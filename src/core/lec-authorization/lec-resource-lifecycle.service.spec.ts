@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { ServiceUnavailableException } from '@nestjs/common';
+import { ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { LecResourceLifecycleService } from './lec-resource-lifecycle.service';
 import { LecPolicyClient } from './lec-policy.client';
@@ -39,7 +39,9 @@ function database(rows: ReturnType<typeof operation>[] = []) {
     transaction: () => ({ execute: (fn: (trx: unknown) => unknown) => fn(db) }),
     insertInto: () => ({
       values: (value: ReturnType<typeof operation>) => ({
-        onConflict: () => ({ doNothing: () => ({ execute: async () => rows.push(value) }) }),
+        onConflict: () => ({
+          doNothing: () => ({ execute: async () => rows.push(value) }),
+        }),
         execute: async () => rows.push(value),
       }),
     }),
@@ -143,5 +145,117 @@ describe('Lec resource lifecycle', () => {
       ),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(rows[0].status).toBe('RESERVE_PENDING');
+  });
+
+  describe('permanent-delete fence', () => {
+    const workspaceId = randomUUID();
+    const rootId = randomUUID();
+    const childId = randomUUID();
+    const items = [
+      { resourceKind: 'DOCMOST_PAGE', resourceId: rootId, resourceVersion: 2 },
+      { resourceKind: 'DOCMOST_PAGE', resourceId: childId, resourceVersion: 2 },
+    ];
+    const deletion = operation({
+      workspaceId,
+      resourceId: rootId,
+      action: 'DELETE_TREE',
+      status: 'DONE',
+      payload: { items },
+    });
+
+    const decision = (
+      item: (typeof items)[number],
+      resourceVersion = item.resourceVersion,
+    ) => ({
+      workspace_id: workspaceId,
+      resource_kind: item.resourceKind,
+      resource_id: item.resourceId,
+      capability: 'RESTORE',
+      resource_version: resourceVersion,
+      allowed: true,
+    });
+
+    it('checks current Core versions immediately before physical deletion', async () => {
+      const policy = {
+        authorize: jest
+          .fn()
+          .mockResolvedValue(items.map((item) => decision(item))),
+      } as unknown as LecPolicyClient;
+      const service = new LecResourceLifecycleService(
+        database([deletion]) as never,
+        policy,
+        new ConfigService(),
+        { emitAsync: jest.fn() } as never,
+      );
+
+      await expect(
+        service.requireDeletedTree(workspaceId, rootId),
+      ).resolves.toBeUndefined();
+      expect(policy.authorize).toHaveBeenCalledWith(
+        workspaceId,
+        principal,
+        items.map((item) => ({
+          resource_kind: item.resourceKind,
+          resource_id: item.resourceId,
+          capability: 'RESTORE',
+        })),
+      );
+    });
+
+    it('rejects a Core version mismatch', async () => {
+      const policy = {
+        authorize: jest
+          .fn()
+          .mockResolvedValue(items.map((item) => decision(item, 3))),
+      } as unknown as LecPolicyClient;
+      const service = new LecResourceLifecycleService(
+        database([deletion]) as never,
+        policy,
+        new ConfigService(),
+        { emitAsync: jest.fn() } as never,
+      );
+
+      await expect(
+        service.requireDeletedTree(workspaceId, rootId),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('rejects ACTIVE Core resources', async () => {
+      const policy = {
+        authorize: jest
+          .fn()
+          .mockResolvedValue(
+            items.map((item) => ({ ...decision(item), allowed: false })),
+          ),
+      } as unknown as LecPolicyClient;
+      const service = new LecResourceLifecycleService(
+        database([deletion]) as never,
+        policy,
+        new ConfigService(),
+        { emitAsync: jest.fn() } as never,
+      );
+
+      await expect(
+        service.requireDeletedTree(workspaceId, rootId),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('fails closed when Core is unavailable', async () => {
+      const policy = {
+        authorize: jest
+          .fn()
+          .mockRejectedValue(new ServiceUnavailableException()),
+      } as unknown as LecPolicyClient;
+      const service = new LecResourceLifecycleService(
+        database([deletion]) as never,
+        policy,
+        new ConfigService(),
+        { emitAsync: jest.fn() } as never,
+      );
+
+      await expect(
+        service.requireDeletedTree(workspaceId, rootId),
+      ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    });
   });
 });

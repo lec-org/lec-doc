@@ -39,16 +39,6 @@ export class CommentNotificationService {
       notifyWatchers,
     } = data;
 
-    const context = await this.getCommentContext(
-      actorId,
-      pageId,
-      spaceId,
-      commentId,
-      appUrl,
-    );
-    if (!context) return;
-
-    const { actor, pageTitle, pageUrl } = context;
     const notifiedUserIds = new Set<string>();
     notifiedUserIds.add(actorId);
 
@@ -61,18 +51,37 @@ export class CommentNotificationService {
     const allCandidateIds = [
       ...new Set([...mentionedUserIds, ...recipientIds]),
     ];
+    const coreAuthorized =
+      await this.notificationService.filterRecipientsWithCoreView(
+        allCandidateIds,
+        pageId,
+        workspaceId,
+      );
+    if (coreAuthorized.size === 0) return;
+
     const usersWithSpaceAccess =
       await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-        allCandidateIds,
+        [...coreAuthorized],
         spaceId,
       );
 
     const usersWithPageAccess =
-      await this.pagePermissionRepo.getUserIdsWithPageAccess(
-        pageId,
-        [...usersWithSpaceAccess],
-      );
+      await this.pagePermissionRepo.getUserIdsWithPageAccess(pageId, [
+        ...usersWithSpaceAccess,
+      ]);
     const usersWithAccess = new Set(usersWithPageAccess);
+    if (usersWithAccess.size === 0) return;
+
+    const context = await this.getCommentContext(
+      actorId,
+      pageId,
+      spaceId,
+      commentId,
+      appUrl,
+    );
+    if (!context) return;
+
+    const { actor, pageTitle, pageUrl } = context;
 
     for (const userId of mentionedUserIds) {
       if (!usersWithAccess.has(userId)) continue;
@@ -136,16 +145,13 @@ export class CommentNotificationService {
 
     if (commentCreatorId === actorId) return;
 
-    const context = await this.getCommentContext(
-      actorId,
-      pageId,
-      spaceId,
-      commentId,
-      appUrl,
-    );
-    if (!context) return;
-
-    const { actor, pageTitle, pageUrl } = context;
+    const coreAuthorized =
+      await this.notificationService.filterRecipientsWithCoreView(
+        [commentCreatorId],
+        pageId,
+        workspaceId,
+      );
+    if (!coreAuthorized.has(commentCreatorId)) return;
 
     const roles = await this.spaceMemberRepo.getUserSpaceRoles(
       commentCreatorId,
@@ -160,11 +166,21 @@ export class CommentNotificationService {
     }
 
     const hasPageAccess =
-      await this.pagePermissionRepo.getUserIdsWithPageAccess(
-        pageId,
-        [commentCreatorId],
-      );
+      await this.pagePermissionRepo.getUserIdsWithPageAccess(pageId, [
+        commentCreatorId,
+      ]);
     if (hasPageAccess.length === 0) return;
+
+    const context = await this.getCommentContext(
+      actorId,
+      pageId,
+      spaceId,
+      commentId,
+      appUrl,
+    );
+    if (!context) return;
+
+    const { actor, pageTitle, pageUrl } = context;
 
     const notification = await this.notificationService.create({
       userId: commentCreatorId,

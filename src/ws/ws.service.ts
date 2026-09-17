@@ -1,14 +1,11 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
+import { Injectable } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
 import { SpaceRole } from '../common/helpers/types/permission';
+import { LecAuthorizationService } from '../core/lec-authorization/lec-authorization.service';
 import {
   TREE_EVENTS,
-  WS_SPACE_RESTRICTION_CACHE_PREFIX,
-  WS_CACHE_TTL_MS,
   getSpaceRoomName,
   getUserRoomName,
 } from './ws.utils';
@@ -19,8 +16,8 @@ export class WsService {
 
   constructor(
     private readonly pagePermissionRepo: PagePermissionRepo,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
     private readonly spaceMemberRepo: SpaceMemberRepo,
+    private readonly authorization: LecAuthorizationService,
   ) {}
 
   setServer(server: Server): void {
@@ -30,7 +27,16 @@ export class WsService {
   async handleTreeEvent(client: Socket, data: any): Promise<void> {
     const room = getSpaceRoomName(data.spaceId);
 
-    if (!client.rooms.has(room)) {
+    if (!client.rooms.has(room) || !client.data.user) return;
+    try {
+      await this.authorization.requireSpace(
+        data.spaceId,
+        client.data.workspaceId,
+        client.data.user,
+        'EDIT',
+      );
+    } catch {
+      client.leave(room);
       return;
     }
 
@@ -47,13 +53,12 @@ export class WsService {
     }
 
     if (data.operation === 'refetchRootTreeNodeEvent') {
-      client.broadcast.to(room).emit('message', data);
-      return;
-    }
-
-    const hasRestrictions = await this.spaceHasRestrictions(data.spaceId);
-    if (!hasRestrictions) {
-      client.broadcast.to(room).emit('message', data);
+      await this.broadcastToAuthorizedSpaceUsers(
+        room,
+        client.id,
+        data.spaceId,
+        data,
+      );
       return;
     }
 
@@ -62,20 +67,7 @@ export class WsService {
       return;
     }
 
-    const isRestricted =
-      await this.pagePermissionRepo.hasRestrictedAncestor(pageId);
-    if (!isRestricted) {
-      client.broadcast.to(room).emit('message', data);
-      return;
-    }
-
     await this.broadcastToAuthorizedUsers(room, client.id, pageId, data);
-  }
-
-  async invalidateSpaceRestrictionCache(spaceId: string): Promise<void> {
-    await this.cacheManager.del(
-      `${WS_SPACE_RESTRICTION_CACHE_PREFIX}${spaceId}`,
-    );
   }
 
   async emitCommentEvent(
@@ -85,31 +77,40 @@ export class WsService {
   ): Promise<void> {
     const room = getSpaceRoomName(spaceId);
 
-    const hasRestrictions = await this.spaceHasRestrictions(spaceId);
-    if (!hasRestrictions) {
-      this.server.to(room).emit('message', data);
-      return;
-    }
-
-    const isRestricted =
-      await this.pagePermissionRepo.hasRestrictedAncestor(pageId);
-    if (!isRestricted) {
-      this.server.to(room).emit('message', data);
-      return;
-    }
-
     await this.broadcastToAuthorizedUsers(room, null, pageId, data);
   }
 
-  async emitToUsers(userIds: string[], data: any): Promise<void> {
+  async emitToUsers(
+    userIds: string[],
+    pageId: string,
+    data: any,
+  ): Promise<void> {
     if (userIds.length === 0) return;
-    const rooms = userIds.map((id) => getUserRoomName(id));
-    this.server.to(rooms).emit('message', data);
+    const sockets = await this.server
+      .in(userIds.map((id) => getUserRoomName(id)))
+      .fetchSockets();
+    for (const socket of sockets) {
+      try {
+        await this.authorization.requirePage(
+          {
+            id: pageId,
+            workspaceId: socket.data.workspaceId,
+            deletedAt: null,
+          },
+          socket.data.user,
+          'VIEW',
+        );
+        socket.emit('message', data);
+      } catch {
+        // Core is the only allow source; do not emit on deny or outage.
+      }
+    }
   }
 
   async emitToSpaceExceptUsers(
     spaceId: string,
     excludeUserIds: string[],
+    pageId: string,
     data: any,
   ): Promise<void> {
     const room = getSpaceRoomName(spaceId);
@@ -118,14 +119,49 @@ export class WsService {
 
     for (const socket of sockets) {
       const userId = socket.data.userId as string;
-      if (userId && !excludeSet.has(userId)) {
+      if (!userId || excludeSet.has(userId)) continue;
+      try {
+        await this.authorization.requirePage(
+          {
+            id: pageId,
+            workspaceId: socket.data.workspaceId,
+            deletedAt: null,
+          },
+          socket.data.user,
+          'VIEW',
+        );
         socket.emit('message', data);
+      } catch {
+        socket.leave(room);
       }
     }
   }
 
   isTreeEvent(data: any): boolean {
     return TREE_EVENTS.has(data?.operation) && !!data?.spaceId;
+  }
+
+  private async broadcastToAuthorizedSpaceUsers(
+    room: string,
+    excludeSocketId: string | null,
+    spaceId: string,
+    data: any,
+  ) {
+    const sockets = await this.server.in(room).fetchSockets();
+    for (const socket of sockets) {
+      if (socket.id === excludeSocketId || !socket.data.user) continue;
+      try {
+        await this.authorization.requireSpace(
+          spaceId,
+          socket.data.workspaceId,
+          socket.data.user,
+          'VIEW',
+        );
+        socket.emit('message', data);
+      } catch {
+        socket.leave(room);
+      }
+    }
   }
 
   private async broadcastToAuthorizedUsers(
@@ -167,28 +203,25 @@ export class WsService {
 
     const authorizedSet = new Set(authorizedUserIds);
     for (const [userId, userSockets] of userSocketMap) {
-      if (authorizedSet.has(userId)) {
-        for (const socket of userSockets) {
+      if (!authorizedSet.has(userId)) continue;
+      for (const socket of userSockets) {
+        try {
+          const page = {
+            id: pageId,
+            workspaceId: socket.data.workspaceId,
+            deletedAt: null,
+          };
+          await this.authorization.requirePage(
+            page,
+            socket.data.user,
+            'VIEW',
+          );
           socket.emit('message', data);
+        } catch {
+          socket.leave(room);
         }
       }
     }
-  }
-
-  private async spaceHasRestrictions(spaceId: string): Promise<boolean> {
-    const cacheKey = `${WS_SPACE_RESTRICTION_CACHE_PREFIX}${spaceId}`;
-
-    const cached = await this.cacheManager.get<boolean>(cacheKey);
-    if (cached !== undefined && cached !== null) {
-      return cached;
-    }
-
-    const hasRestrictions =
-      await this.pagePermissionRepo.hasRestrictedPagesInSpace(spaceId);
-
-    await this.cacheManager.set(cacheKey, hasRestrictions, WS_CACHE_TTL_MS);
-
-    return hasRestrictions;
   }
 
   private extractPageId(data: any): string | null {

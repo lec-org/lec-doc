@@ -20,6 +20,7 @@ import { LecPolicyClient } from './lec-policy.client';
 import {
   LecPrincipal,
   LecResource,
+  reparentEnvelopeSchema,
   resourceEnvelopeSchema,
   resourceKindSchema,
   treeResponseSchema,
@@ -73,9 +74,7 @@ export class LecResourceLifecycleService {
       .where('action', '=', 'BIND_SPACE')
       .executeTakeFirst();
     if (!operation) {
-      const organizationId = this.config.get<string>(
-        'LEC_DOC_ORGANIZATION_ID',
-      );
+      const organizationId = this.config.get<string>('LEC_DOC_ORGANIZATION_ID');
       if (!z.uuid().safeParse(organizationId).success) throw this.unavailable();
       const now = new Date();
       await this.db
@@ -158,13 +157,33 @@ export class LecResourceLifecycleService {
   ): Promise<T> {
     if (parentKind === 'DOCMOST_SPACE')
       await this.ensureSpaceBound(user, principal, parentId);
-    const reservation = await this.reservePage(
-      user,
-      principal,
-      pageId,
-      parentKind,
-      parentId,
-    );
+    const previous = await this.db
+      .selectFrom('lecResourceOperations')
+      .selectAll()
+      .where('workspaceId', '=', user.workspaceId)
+      .where('resourceId', '=', pageId)
+      .where('action', '=', 'CREATE_PAGE')
+      .orderBy('createdAt', 'desc')
+      .executeTakeFirst();
+    const existing = previous
+      ? await this.db
+          .selectFrom('pages')
+          .select('id')
+          .where('id', '=', pageId)
+          .where('workspaceId', '=', user.workspaceId)
+          .executeTakeFirst()
+      : undefined;
+    if (previous && existing) {
+      await this.processCreate(previous);
+      return existing as T;
+    }
+    if (previous && previous.status !== 'DOC_INSERT_PENDING') {
+      await this.processCreate(previous);
+      throw new ConflictException('page lifecycle replay did not recover page');
+    }
+    const reservation = previous
+      ? { operationId: previous.id }
+      : await this.reservePage(user, principal, pageId, parentKind, parentId);
     let value: T;
     try {
       value = await this.db.transaction().execute(async (trx) => {
@@ -199,6 +218,86 @@ export class LecResourceLifecycleService {
       throw error;
     }
     await this.processCreate(await this.operation(reservation.operationId));
+    return value;
+  }
+
+  async movePage<T>(
+    user: Pick<User, 'id' | 'workspaceId'>,
+    principal: OidcPrincipal,
+    pageId: string,
+    expectedVersion: number,
+    parentKind: 'DOCMOST_SPACE' | 'DOCMOST_PAGE',
+    parentId: string,
+    move: (trx: KyselyTransaction) => Promise<T>,
+  ): Promise<T> {
+    const operationId = randomUUID();
+    const payload = { parentKind, parentId, expectedVersion };
+    const now = new Date();
+    await this.db
+      .insertInto('lecResourceOperations')
+      .values({
+        id: operationId,
+        workspaceId: user.workspaceId,
+        resourceKind: 'DOCMOST_PAGE',
+        resourceId: pageId,
+        action: 'REPARENT_PAGE',
+        status: 'CORE_REPARENT_PREPARE_PENDING',
+        actorUserId: user.id,
+        actorIssuer: principal.issuer,
+        actorSubject: principal.subject,
+        payload,
+        availableAt: now,
+        updatedAt: now,
+      })
+      .execute();
+    let operation = await this.operation(operationId);
+    await this.processReparent(operation);
+    operation = await this.operation(operationId);
+    if (operation.status !== 'DOC_REPARENT_PENDING') throw this.unavailable();
+
+    let value: T;
+    try {
+      value = await this.db.transaction().execute(async (trx) => {
+        const moved = await move(trx);
+        await trx
+          .updateTable('lecResourceOperations')
+          .set({
+            status: 'CORE_REPARENT_COMMIT_PENDING',
+            availableAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where('id', '=', operationId)
+          .where('status', '=', 'DOC_REPARENT_PENDING')
+          .executeTakeFirstOrThrow();
+        return moved;
+      });
+    } catch (error) {
+      await this.db
+        .updateTable('lecResourceOperations')
+        .set({
+          status: 'CORE_REPARENT_CANCEL_PENDING',
+          availableAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where('id', '=', operationId)
+        .where('status', '=', 'DOC_REPARENT_PENDING')
+        .execute();
+      try {
+        await this.processReparent(await this.operation(operationId));
+      } catch {
+        // Durable cancellation remains pending for reconciliation.
+      }
+      throw error;
+    }
+
+    try {
+      await this.processReparent(await this.operation(operationId));
+    } catch (error) {
+      await this.recordFailure(await this.operation(operationId), error);
+      if (error instanceof HttpException && error.getStatus() < 500) {
+        throw error;
+      }
+    }
     return value;
   }
 
@@ -247,10 +346,55 @@ export class LecResourceLifecycleService {
     await this.emitSoon(await this.operation(operation.id));
   }
 
+  async requireDeletedTree(
+    workspaceId: string,
+    rootId: string,
+    items?: { id: string; resourceVersion?: number }[],
+  ) {
+    const deletion = await this.findDeleteOperation(workspaceId, rootId);
+    const payload = treePayloadSchema.parse(deletion.payload);
+    const deleted = new Map(
+      payload.items.map((item) => [item.resourceId, item.resourceVersion]),
+    );
+    if (
+      items &&
+      (items.length !== deleted.size ||
+        items.some(
+          (item) =>
+            !deleted.has(item.id) ||
+            (item.resourceVersion !== undefined &&
+              deleted.get(item.id) !== item.resourceVersion),
+        ))
+    )
+      throw this.versionConflict();
+
+    const current = new Map<string, number>();
+    for (let index = 0; index < payload.items.length; index += 100) {
+      const decisions = await this.policy.authorize(
+        workspaceId,
+        this.principal(deletion),
+        payload.items.slice(index, index + 100).map((item) => ({
+          resource_kind: item.resourceKind,
+          resource_id: item.resourceId,
+          capability: 'RESTORE',
+        })),
+      );
+      decisions.forEach((decision) => {
+        if (decision.allowed)
+          current.set(decision.resource_id, decision.resource_version);
+      });
+    }
+    if (
+      current.size !== deleted.size ||
+      [...deleted].some(([id, version]) => current.get(id) !== version)
+    )
+      throw this.versionConflict();
+  }
+
   async findDeleteOperation(workspaceId: string, rootId: string) {
     const operation = await this.db
       .selectFrom('lecResourceOperations')
-      .select(['id'])
+      .selectAll()
       .where('workspaceId', '=', workspaceId)
       .where('resourceKind', '=', 'DOCMOST_PAGE')
       .where('resourceId', '=', rootId)
@@ -258,10 +402,11 @@ export class LecResourceLifecycleService {
       .where('status', '=', 'DONE')
       .orderBy('createdAt', 'desc')
       .executeTakeFirst();
-    if (!operation) throw new ConflictException({
-      code: 'DOC_VERSION_CONFLICT',
-      message: '缺少可恢复的文档删除记录',
-    });
+    if (!operation)
+      throw new ConflictException({
+        code: 'DOC_VERSION_CONFLICT',
+        message: '缺少可恢复的文档删除记录',
+      });
     return operation;
   }
 
@@ -360,6 +505,10 @@ export class LecResourceLifecycleService {
           'CREATE_EVENT_PENDING',
           'DELETE_EVENT_PENDING',
           'RESTORE_EVENT_PENDING',
+          'CORE_REPARENT_PREPARE_PENDING',
+          'DOC_REPARENT_PENDING',
+          'CORE_REPARENT_COMMIT_PENDING',
+          'CORE_REPARENT_CANCEL_PENDING',
         ])
         .where('availableAt', '<=', new Date())
         .where((eb) =>
@@ -397,14 +546,72 @@ export class LecResourceLifecycleService {
     try {
       if (claimed.action === 'BIND_SPACE') await this.processBind(claimed);
       if (claimed.action === 'CREATE_PAGE') await this.processCreate(claimed);
-      if (
-        claimed.action === 'DELETE_TREE' ||
-        claimed.action === 'RESTORE_TREE'
-      )
+      if (claimed.action === 'REPARENT_PAGE')
+        await this.processReparent(claimed);
+      if (claimed.action === 'DELETE_TREE' || claimed.action === 'RESTORE_TREE')
         await this.processTree(claimed);
     } catch (error) {
       await this.recordFailure(claimed, error);
     }
+  }
+
+  private async processReparent(operation: LifecycleOperation) {
+    if (operation.status === 'DONE') return;
+    if (operation.status === 'DOC_REPARENT_PENDING') {
+      await this.pending(operation.id, 'CORE_REPARENT_CANCEL_PENDING');
+      operation = await this.operation(operation.id);
+    }
+    const payload = z
+      .strictObject({
+        parentKind: resourceKindSchema,
+        parentId: z.uuid(),
+        expectedVersion: z.number().int().min(1),
+      })
+      .parse(operation.payload);
+    const action =
+      operation.status === 'CORE_REPARENT_PREPARE_PENDING'
+        ? 'PREPARE'
+        : operation.status === 'CORE_REPARENT_COMMIT_PENDING'
+          ? 'COMMIT'
+          : operation.status === 'CORE_REPARENT_CANCEL_PENDING'
+            ? 'CANCEL'
+            : undefined;
+    if (!action) return;
+    const response = await this.policy.send(
+      'doc-control/reparent',
+      {
+        request_id: randomUUID(),
+        workspace_id: operation.workspaceId,
+        principal: this.principal(operation),
+        resource_kind: 'DOCMOST_PAGE',
+        resource_id: operation.resourceId,
+        expected_version: payload.expectedVersion,
+        operation_id: operation.id,
+        action,
+        parent_kind: payload.parentKind,
+        parent_id: payload.parentId,
+      },
+      reparentEnvelopeSchema,
+    );
+    if (
+      response.data.workspace_id !== operation.workspaceId ||
+      response.data.resource_kind !== 'DOCMOST_PAGE' ||
+      response.data.resource_id !== operation.resourceId ||
+      response.data.operation_id !== operation.id
+    )
+      throw this.unavailable();
+    if (action === 'PREPARE') {
+      if (response.data.operation_status !== 'PREPARED')
+        throw this.unavailable();
+      await this.pending(operation.id, 'DOC_REPARENT_PENDING');
+      return;
+    }
+    if (
+      response.data.operation_status !==
+      (action === 'COMMIT' ? 'COMMITTED' : 'CANCELLED')
+    )
+      throw this.unavailable();
+    await this.done(operation.id);
   }
 
   private async processBind(operation: LifecycleOperation) {
@@ -483,6 +690,15 @@ export class LecResourceLifecycleService {
   private async processCreate(operation: LifecycleOperation) {
     if (operation.status === 'CREATE_EVENT_PENDING') {
       await this.emitSoon(operation);
+      return;
+    }
+    if (operation.status === 'DONE') {
+      const page = await this.db
+        .selectFrom('pages')
+        .select('id')
+        .where('id', '=', operation.resourceId)
+        .executeTakeFirst();
+      if (!page) throw new ConflictException('activated resource has no page');
       return;
     }
     if (operation.status === 'RESERVE_PENDING') {
@@ -901,6 +1117,13 @@ export class LecResourceLifecycleService {
       })
       .where('id', '=', operation.id)
       .execute();
+  }
+
+  private versionConflict() {
+    return new ConflictException({
+      code: 'DOC_VERSION_CONFLICT',
+      message: '文档删除状态已变化，请刷新重试',
+    });
   }
 
   private unavailable() {

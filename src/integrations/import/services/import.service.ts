@@ -1,5 +1,4 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { MultipartFile } from '@fastify/multipart';
 import * as path from 'path';
 import {
@@ -30,22 +29,26 @@ import { Queue } from 'bullmq';
 import { QueueJob, QueueName } from '../../queue/constants';
 import { load } from 'cheerio';
 import { normalizeImportHtml } from '../utils/import-formatter';
+import { User } from '@docmost/db/types/entity.types';
+import { LecPrincipal } from '../../../core/lec-authorization/lec-policy.types';
+import { LecResourceLifecycleService } from '../../../core/lec-authorization/lec-resource-lifecycle.service';
 
 @Injectable()
 export class ImportService {
   private readonly logger = new Logger(ImportService.name);
 
   constructor(
-    private readonly pageRepo: PageRepo,
     private readonly storageService: StorageService,
     @InjectKysely() private readonly db: KyselyDB,
     @InjectQueue(QueueName.FILE_TASK_QUEUE)
     private readonly fileTaskQueue: Queue,
+    private readonly lifecycle: LecResourceLifecycleService,
   ) {}
 
   async importPage(
     filePromise: Promise<MultipartFile>,
-    userId: string,
+    user: User,
+    principal: Extract<LecPrincipal, { type: 'OIDC' }>,
     spaceId: string,
     workspaceId: string,
   ) {
@@ -88,19 +91,33 @@ export class ImportService {
     if (prosemirrorJson) {
       try {
         const pagePosition = await this.getNewPagePosition(spaceId);
-
-        createdPage = await this.pageRepo.insertPage({
-          slugId: generateSlugId(),
-          title: pageTitle,
-          content: prosemirrorJson,
-          textContent: jsonToText(prosemirrorJson),
-          ydoc: await this.createYdoc(prosemirrorJson),
-          position: pagePosition,
-          spaceId: spaceId,
-          creatorId: userId,
-          workspaceId: workspaceId,
-          lastUpdatedById: userId,
-        });
+        const ydoc = await this.createYdoc(prosemirrorJson);
+        const pageId = uuid7();
+        createdPage = await this.lifecycle.createPage(
+          user,
+          principal,
+          pageId,
+          'DOCMOST_SPACE',
+          spaceId,
+          (trx) =>
+            trx
+              .insertInto('pages')
+              .values({
+                id: pageId,
+                slugId: generateSlugId(),
+                title: pageTitle,
+                content: prosemirrorJson,
+                textContent: jsonToText(prosemirrorJson),
+                ydoc,
+                position: pagePosition,
+                spaceId,
+                creatorId: user.id,
+                workspaceId,
+                lastUpdatedById: user.id,
+              })
+              .returningAll()
+              .executeTakeFirstOrThrow(),
+        );
 
         this.logger.debug(
           `Successfully imported "${title}${fileExtension}. ID: ${createdPage.id} - SlugId: ${createdPage.slugId}"`,

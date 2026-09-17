@@ -11,10 +11,7 @@ import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { InsertablePage, Page, User } from '@docmost/db/types/entity.types';
 import { PaginationOptions } from '@docmost/db/pagination/pagination-options';
-import {
-  CursorPaginationResult,
-  executeWithCursorPagination,
-} from '@docmost/db/pagination/cursor-pagination';
+import { CursorPaginationResult } from '@docmost/db/pagination/cursor-pagination';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB, KyselyTransaction } from '@docmost/db/types/kysely.types';
 import { generateJitteredKeyBetween } from 'fractional-indexing-jittered';
@@ -45,8 +42,6 @@ import { StorageService } from '../../../integrations/storage/storage.service';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { QueueJob, QueueName } from '../../../integrations/queue/constants';
-import { EventName } from '../../../common/events/event.contants';
-import { EventEmitter2 } from '@nestjs/event-emitter';
 import { CollaborationGateway } from '../../../collaboration/collaboration.gateway';
 import {
   INTERNAL_LINK_REGEX,
@@ -57,7 +52,12 @@ import { WatcherService } from '../../watcher/watcher.service';
 import { sql } from 'kysely';
 import { TransclusionService } from '../transclusion/transclusion.service';
 import { LecResourceLifecycleService } from '../../lec-authorization/lec-resource-lifecycle.service';
-import { LecPrincipal } from '../../lec-authorization/lec-policy.types';
+import { LecAuthorizationService } from '../../lec-authorization/lec-authorization.service';
+import {
+  LecCapability,
+  LecPrincipal,
+} from '../../lec-authorization/lec-policy.types';
+import { PageMaintenanceService } from './page-maintenance.service';
 
 @Injectable()
 export class PageService {
@@ -70,13 +70,13 @@ export class PageService {
     @InjectKysely() private readonly db: KyselyDB,
     private readonly storageService: StorageService,
     @InjectQueue(QueueName.ATTACHMENT_QUEUE) private attachmentQueue: Queue,
-    @InjectQueue(QueueName.AI_QUEUE) private aiQueue: Queue,
     @InjectQueue(QueueName.GENERAL_QUEUE) private generalQueue: Queue,
-    private eventEmitter: EventEmitter2,
     private collaborationGateway: CollaborationGateway,
     private readonly watcherService: WatcherService,
     private readonly transclusionService: TransclusionService,
     private readonly lifecycle: LecResourceLifecycleService,
+    private readonly lecAuthorization: LecAuthorizationService,
+    private readonly maintenance: PageMaintenanceService,
   ) {}
 
   async findById(
@@ -179,49 +179,12 @@ export class PageService {
     return page;
   }
 
-  async nextPagePosition(
+  nextPagePosition(
     spaceId: string,
     parentPageId?: string,
     trx?: KyselyTransaction,
   ) {
-    let pagePosition: string;
-
-    const lastPageQuery = dbOrTx(this.db, trx)
-      .selectFrom('pages')
-      .select(['position'])
-      .where('spaceId', '=', spaceId)
-      .where('deletedAt', 'is', null)
-      .orderBy('position', (ob) => ob.collate('C').desc())
-      .limit(1);
-
-    if (parentPageId) {
-      // check for children of this page
-      const lastPage = await lastPageQuery
-        .where('parentPageId', '=', parentPageId)
-        .executeTakeFirst();
-
-      if (!lastPage) {
-        pagePosition = generateJitteredKeyBetween(null, null);
-      } else {
-        // if there is an existing page, we should get a position below it
-        pagePosition = generateJitteredKeyBetween(lastPage.position, null);
-      }
-    } else {
-      // for root page
-      const lastPage = await lastPageQuery
-        .where('parentPageId', 'is', null)
-        .executeTakeFirst();
-
-      // if no existing page, make this the first
-      if (!lastPage) {
-        pagePosition = generateJitteredKeyBetween(null, null); // we expect "a0"
-      } else {
-        // if there is an existing page, we should get a position below it
-        pagePosition = generateJitteredKeyBetween(lastPage.position, null);
-      }
-    }
-
-    return pagePosition;
+    return this.maintenance.nextPagePosition(spaceId, parentPageId, trx);
   }
 
   async update(
@@ -246,6 +209,7 @@ export class PageService {
 
     this.generalQueue
       .add(QueueJob.ADD_PAGE_WATCHERS, {
+        actorId: user.id,
         userIds: [user.id],
         pageId: page.id,
         spaceId: page.spaceId,
@@ -299,104 +263,142 @@ export class PageService {
     spaceId: string,
     pagination: PaginationOptions,
     pageId?: string,
-    userId?: string,
+    user?: User,
     spaceCanEdit?: boolean,
   ): Promise<CursorPaginationResult<Partial<Page> & { hasChildren: boolean }>> {
-    let query = this.db
-      .selectFrom('pages')
-      .select([
-        'id',
-        'slugId',
-        'title',
-        'icon',
-        'position',
-        'parentPageId',
-        'spaceId',
-        'creatorId',
-        'isBase',
-        'deletedAt',
-      ])
-      .select((eb) => this.pageRepo.withHasChildren(eb))
-      .where('deletedAt', 'is', null)
-      .where('spaceId', '=', spaceId);
-
-    if (pageId) {
-      query = query.where('parentPageId', '=', pageId);
-    } else {
-      query = query.where('parentPageId', 'is', null);
+    if (!user) {
+      return this.pageRepo.findSidebarCandidates(
+        spaceId,
+        pageId,
+        pagination,
+      ) as any;
     }
 
-    const result = await executeWithCursorPagination(query, {
-      perPage: pagination.limit,
-      cursor: pagination.cursor,
-      beforeCursor: pagination.beforeCursor,
-      fields: [
-        {
-          expression: 'position',
-          direction: 'asc',
-          orderModifier: (ob) => ob.collate('C').asc(),
-          cursorExpression: sql`position collate "C"`,
-        },
-        { expression: 'id', direction: 'asc' },
-      ],
-      parseCursor: (cursor) => ({
-        position: cursor.position,
-        id: cursor.id,
-      }),
-    });
+    const limit = pagination.limit;
+    const backwards = Boolean(pagination.beforeCursor && !pagination.cursor);
+    const hasRestrictions =
+      await this.pagePermissionRepo.hasRestrictedPagesInSpace(spaceId);
+    const canEdit = new Map<string, boolean>();
+    let cursor = pagination.cursor;
+    let beforeCursor = pagination.beforeCursor;
+    let exhausted = false;
+    let lastScannedCursor: string | undefined;
+    let authorized: Array<
+      Pick<Page, 'id' | 'workspaceId'> & { $cursor: string }
+    > = [];
 
-    if (userId && result.items.length > 0) {
-      const hasRestrictions =
-        await this.pagePermissionRepo.hasRestrictedPagesInSpace(spaceId);
-
-      if (!hasRestrictions) {
-        result.items = result.items.map((p: any) => ({
-          ...p,
-          canEdit: spaceCanEdit ?? true,
-        }));
-      } else {
-        const pageIds = result.items.map((p: any) => p.id);
-
-        const accessiblePages =
-          await this.pagePermissionRepo.filterAccessiblePageIdsWithPermissions(
-            pageIds,
-            userId,
-          );
-
-        const permissionMap = new Map(
-          accessiblePages.map((p) => [p.id, p.canEdit]),
-        );
-
-        result.items = result.items
-          .filter((p: any) => permissionMap.has(p.id))
-          .map((p: any) => ({
-            ...p,
-            canEdit: permissionMap.get(p.id) && (spaceCanEdit ?? true),
-          }));
-
-        const pagesWithChildren = result.items.filter(
-          (p: any) => p.hasChildren,
-        );
-        if (pagesWithChildren.length > 0) {
-          const parentIds = pagesWithChildren.map((p: any) => p.id);
-          const parentsWithAccessibleChildren =
-            await this.pagePermissionRepo.getParentIdsWithAccessibleChildren(
-              parentIds,
-              userId,
-            );
-          const hasAccessibleChildrenSet = new Set(
-            parentsWithAccessibleChildren,
-          );
-
-          result.items = result.items.map((p: any) => ({
-            ...p,
-            hasChildren: p.hasChildren && hasAccessibleChildrenSet.has(p.id),
-          }));
-        }
+    for (;;) {
+      const batch = await this.pageRepo.findSidebarCandidates(spaceId, pageId, {
+        limit: 100,
+        cursor,
+        beforeCursor,
+      } as PaginationOptions);
+      const candidates = batch.items;
+      if (candidates.length === 0) {
+        exhausted = true;
+        break;
       }
+
+      const coreAllowed = await this.lecAuthorization.filterPages(
+        candidates,
+        user,
+      );
+      let allowed = coreAllowed;
+      if (hasRestrictions && coreAllowed.length > 0) {
+        const accessible =
+          await this.pagePermissionRepo.filterAccessiblePageIdsWithPermissions(
+            coreAllowed.map((candidate) => candidate.id),
+            user.id,
+          );
+        const accessibleById = new Map(
+          accessible.map((candidate) => [candidate.id, candidate.canEdit]),
+        );
+        allowed = coreAllowed.filter((candidate) =>
+          accessibleById.has(candidate.id),
+        );
+        accessibleById.forEach((value, id) => canEdit.set(id, value));
+      } else {
+        coreAllowed.forEach((candidate) => canEdit.set(candidate.id, true));
+      }
+      authorized = backwards
+        ? [...allowed, ...authorized]
+        : [...authorized, ...allowed];
+
+      if (backwards) {
+        lastScannedCursor = candidates[0].$cursor;
+        beforeCursor = lastScannedCursor;
+        exhausted = !batch.meta.hasNextPage;
+      } else {
+        lastScannedCursor = candidates[candidates.length - 1].$cursor;
+        cursor = batch.meta.nextCursor ?? undefined;
+        exhausted = !cursor;
+      }
+      if (authorized.length >= limit || exhausted) break;
     }
 
-    return result;
+    const selected = backwards
+      ? authorized.slice(-limit)
+      : authorized.slice(0, limit);
+    const selectedIds = selected.map((candidate) => candidate.id);
+    const content = await this.pageRepo.findSidebarContentByIds(selectedIds);
+    const byId = new Map(content.map((page) => [page.id, page]));
+    const items = selectedIds
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((page: any) => ({
+        ...page,
+        canEdit: canEdit.get(page.id) && (spaceCanEdit ?? true),
+      }));
+
+    const parentIds = items
+      .filter((page) => page.hasChildren)
+      .map((page) => page.id);
+    if (parentIds.length > 0) {
+      let children = await this.pageRepo.findChildPageCandidates(parentIds);
+      children = await this.lecAuthorization.filterPages(children, user);
+      if (hasRestrictions && children.length > 0) {
+        const accessibleChildren =
+          await this.pagePermissionRepo.filterAccessiblePageIds({
+            pageIds: children.map((child) => child.id),
+            userId: user.id,
+          });
+        const accessible = new Set(accessibleChildren);
+        children = children.filter((child) => accessible.has(child.id));
+      }
+      const parentsWithChildren = new Set(
+        children.map((child) => child.parentPageId),
+      );
+      items.forEach((page) => {
+        page.hasChildren = parentsWithChildren.has(page.id);
+      });
+    }
+
+    const hasMore = authorized.length > limit || !exhausted;
+    const firstCursor = selected[0]?.$cursor ?? lastScannedCursor ?? null;
+    const lastCursor =
+      selected[selected.length - 1]?.$cursor ?? lastScannedCursor ?? null;
+    return {
+      items,
+      meta: {
+        limit,
+        hasNextPage: backwards ? Boolean(pagination.beforeCursor) : hasMore,
+        hasPrevPage: backwards ? hasMore : Boolean(pagination.cursor),
+        nextCursor: backwards
+          ? pagination.beforeCursor
+            ? lastCursor
+            : null
+          : hasMore
+            ? lastCursor
+            : null,
+        prevCursor: backwards
+          ? hasMore
+            ? firstCursor
+            : null
+          : pagination.cursor
+            ? firstCursor
+            : null,
+      },
+    };
   }
 
   async movePageToSpace(rootPage: Page, spaceId: string, userId: string) {
@@ -517,22 +519,6 @@ export class PageService {
             trx,
           },
         );
-
-        await this.aiQueue.add(
-          QueueJob.PAGE_MOVED_TO_SPACE,
-          {
-            pageIds: pageIdsToMove,
-            spaceId,
-            workspaceId: currentRootPage.workspaceId,
-          },
-          {
-            attempts: 2,
-            backoff: {
-              type: 'fixed',
-              delay: 2 * 60 * 1000,
-            },
-          },
-        );
       }
 
       return { childPageIds };
@@ -540,7 +526,15 @@ export class PageService {
   }
 
   async duplicatePage(
-    rootPage: Page,
+    rootPage: Pick<
+      Page,
+      | 'id'
+      | 'workspaceId'
+      | 'spaceId'
+      | 'parentPageId'
+      | 'position'
+      | 'deletedAt'
+    >,
     targetSpaceId: string | undefined,
     authUser: User,
   ) {
@@ -548,30 +542,84 @@ export class PageService {
     const isDuplicateInSameSpace =
       !targetSpaceId || targetSpaceId === rootPage.spaceId;
 
-    let nextPosition: string;
-
-    if (isDuplicateInSameSpace) {
-      // For duplicate in same space, position right after the original page
-      nextPosition = generateJitteredKeyBetween(rootPage.position, null);
-    } else {
-      // For copy to different space, position at the end
-      nextPosition = await this.nextPagePosition(spaceId);
+    const candidates = await this.pageRepo.findPageTreeCandidates(rootPage.id);
+    const currentRoot = candidates.find((page) => page.id === rootPage.id);
+    if (
+      !currentRoot ||
+      currentRoot.workspaceId !== rootPage.workspaceId ||
+      currentRoot.spaceId !== rootPage.spaceId
+    ) {
+      throw new ConflictException('Page location changed; retry the copy');
     }
 
-    const allPages = await this.pageRepo.getPageAndDescendants(rootPage.id, {
-      includeContent: true,
-    });
+    // Core must authorize the complete source tree. Local ACL may only narrow
+    // that authorized tree; it must never turn a Core denial into a partial copy.
+    const coreAllowed = await this.lecAuthorization.filterPages(
+      candidates,
+      authUser,
+      'VIEW',
+    );
+    const coreAllowedIds = new Set(coreAllowed.map((page) => page.id));
+    if (candidates.some((page) => !coreAllowedIds.has(page.id))) {
+      this.lecAuthorization.deny();
+    }
+    await this.lecAuthorization.requireSpace(
+      spaceId,
+      rootPage.workspaceId,
+      authUser,
+      'CREATE',
+    );
+    const principal = await this.lecAuthorization.principal(
+      authUser,
+      rootPage.workspaceId,
+    );
+    if (principal.type !== 'OIDC') this.lecAuthorization.deny();
 
-    // Filter to only accessible pages while maintaining tree integrity
-    const pages = await this.filterAccessibleTreePages(
-      allPages,
+    const accessibleCandidates = await this.filterAccessibleTreePages(
+      candidates,
       rootPage.id,
       authUser.id,
       rootPage.spaceId,
     );
+    if (!accessibleCandidates.some((page) => page.id === rootPage.id)) {
+      this.lecAuthorization.deny();
+    }
+
+    const loadedPages = await this.pageRepo.findExportPagesByIds(
+      accessibleCandidates.map((page) => page.id),
+    );
+    const loadedById = new Map(loadedPages.map((page) => [page.id, page]));
+    const pages = accessibleCandidates.map((candidate) => {
+      const page = loadedById.get(candidate.id);
+      if (!page)
+        throw new ConflictException('Page tree changed; retry the copy');
+      return page;
+    });
+
+    const nextPosition = isDuplicateInSameSpace
+      ? generateJitteredKeyBetween(rootPage.position, null)
+      : await this.nextPagePosition(spaceId);
+
+    const orderedPages: typeof pages = [];
+    const remaining = new Map(pages.map((page) => [page.id, page]));
+    while (remaining.size > 0) {
+      let added = false;
+      for (const page of remaining.values()) {
+        if (
+          page.id === rootPage.id ||
+          orderedPages.some((parent) => parent.id === page.parentPageId)
+        ) {
+          orderedPages.push(page);
+          remaining.delete(page.id);
+          added = true;
+        }
+      }
+      if (!added)
+        throw new ConflictException('Page tree changed; retry the copy');
+    }
 
     const pageMap = new Map<string, CopyPageMapEntry>();
-    pages.forEach((page) => {
+    orderedPages.forEach((page) => {
       pageMap.set(page.id, {
         newPageId: uuid7(),
         newSlugId: generateSlugId(),
@@ -587,7 +635,7 @@ export class PageService {
     const attachmentMap = new Map<string, ICopyPageAttachment>();
 
     const insertablePages: InsertablePage[] = await Promise.all(
-      pages.map(async (page) => {
+      orderedPages.map(async (page) => {
         const pageContent = getProsemirrorContent(page.content);
         const pageFromMap = pageMap.get(page.id);
 
@@ -719,11 +767,20 @@ export class PageService {
       }),
     );
 
-    await this.db.insertInto('pages').values(insertablePages).execute();
+    for (const page of insertablePages) {
+      const isRoot = page.id === pageMap.get(rootPage.id).newPageId;
+      await this.lifecycle.createPage(
+        authUser,
+        principal,
+        page.id,
+        isRoot && !page.parentPageId ? 'DOCMOST_SPACE' : 'DOCMOST_PAGE',
+        isRoot && !page.parentPageId ? spaceId : page.parentPageId!,
+        (trx) => this.pageRepo.insertPage(page, trx, false),
+      );
+    }
 
-    // Extract transclusions from every duplicated page and persist them in
-    // one statement. Duplication bypasses Yjs onStoreDocument; brand-new
-    // pages never have prior rows so we can skip the diff and just bulk-insert.
+    // Brand-new pages have no prior transclusion rows, so bulk extraction is
+    // safe after every page has completed its lifecycle.
     try {
       await this.transclusionService.insertTransclusionsForPages(
         insertablePages.map((p) => ({
@@ -755,10 +812,6 @@ export class PageService {
     }
 
     const insertedPageIds = insertablePages.map((page) => page.id);
-    this.eventEmitter.emit(EventName.PAGE_CREATED, {
-      pageIds: insertedPageIds,
-      workspaceId: authUser.workspaceId,
-    });
 
     //TODO: best to handle this in a queue
     const attachmentsIds = Array.from(attachmentMap.keys());
@@ -771,52 +824,52 @@ export class PageService {
         .execute();
 
       for (const attachment of attachments) {
-        try {
-          const pageAttachment = attachmentMap.get(attachment.id);
+        const pageAttachment = attachmentMap.get(attachment.id);
 
-          // make sure the copied attachment belongs to the page it was copied from
-          if (attachment.pageId !== pageAttachment.oldPageId) {
-            continue;
-          }
-
-          const newAttachmentId = pageAttachment.newAttachmentId;
-
-          const newPageId = pageAttachment.newPageId;
-
-          const newPathFile = attachment.filePath.replace(
-            attachment.id,
-            newAttachmentId,
-          );
-
-          try {
-            await this.storageService.copy(attachment.filePath, newPathFile);
-
-            await this.db
-              .insertInto('attachments')
-              .values({
-                id: newAttachmentId,
-                type: attachment.type,
-                filePath: newPathFile,
-                fileName: attachment.fileName,
-                fileSize: attachment.fileSize,
-                mimeType: attachment.mimeType,
-                fileExt: attachment.fileExt,
-                creatorId: attachment.creatorId,
-                workspaceId: attachment.workspaceId,
-                pageId: newPageId,
-                spaceId: spaceId,
-              })
-              .execute();
-          } catch (err) {
-            this.logger.error(
-              `Duplicate page: failed to copy attachment ${attachment.id}`,
-              err,
-            );
-            // Continue with other attachments even if one fails
-          }
-        } catch (err) {
-          this.logger.error(err);
+        // make sure the copied attachment belongs to the page it was copied from
+        if (!pageAttachment || attachment.pageId !== pageAttachment.oldPageId) {
+          continue;
         }
+
+        const newAttachmentId = pageAttachment.newAttachmentId;
+        const newPageId = pageAttachment.newPageId;
+        const sourcePage = {
+          id: pageAttachment.oldPageId,
+          workspaceId: rootPage.workspaceId,
+          deletedAt: null,
+        };
+        const targetPage = {
+          id: newPageId,
+          workspaceId: rootPage.workspaceId,
+          deletedAt: null,
+        };
+        const newPathFile = attachment.filePath.replace(
+          attachment.id,
+          newAttachmentId,
+        );
+
+        await this.lecAuthorization.requirePage(sourcePage, authUser, 'VIEW');
+        await this.lecAuthorization.requirePage(targetPage, authUser, 'EDIT');
+        await this.storageService.copy(attachment.filePath, newPathFile);
+
+        await this.lecAuthorization.requirePage(sourcePage, authUser, 'VIEW');
+        await this.lecAuthorization.requirePage(targetPage, authUser, 'EDIT');
+        await this.db
+          .insertInto('attachments')
+          .values({
+            id: newAttachmentId,
+            type: attachment.type,
+            filePath: newPathFile,
+            fileName: attachment.fileName,
+            fileSize: attachment.fileSize,
+            mimeType: attachment.mimeType,
+            fileExt: attachment.fileExt,
+            creatorId: attachment.creatorId,
+            workspaceId: attachment.workspaceId,
+            pageId: newPageId,
+            spaceId: spaceId,
+          })
+          .execute();
       }
     }
 
@@ -825,7 +878,7 @@ export class PageService {
       includeSpace: true,
     });
 
-    const hasChildren = pages.length > 1;
+    const hasChildren = orderedPages.length > 1;
     const childPageIds = insertedPageIds.filter((id) => id !== newPageId);
 
     return {
@@ -835,7 +888,11 @@ export class PageService {
     };
   }
 
-  async movePage(dto: MovePageDto, movedPage: Page) {
+  async movePage(
+    dto: MovePageDto,
+    movedPage: Page,
+    existingTrx?: KyselyTransaction,
+  ) {
     // validate position value by attempting to generate a key
     try {
       generateJitteredKeyBetween(dto.position, null);
@@ -847,59 +904,60 @@ export class PageService {
       throw new BadRequestException('A page cannot be its own parent');
     }
 
-    await executeTx(this.db, async (trx) => {
-      await this.pageRepo.lockPageHierarchySpaces(
-        [movedPage.spaceId],
-        trx,
-      );
+    await executeTx(
+      this.db,
+      async (trx) => {
+        await this.pageRepo.lockPageHierarchySpaces([movedPage.spaceId], trx);
 
-      const currentPage = await this.pageRepo.findById(dto.pageId, { trx });
-      if (!currentPage || currentPage.deletedAt) {
-        throw new NotFoundException('Moved page not found');
-      }
-      if (currentPage.spaceId !== movedPage.spaceId) {
-        throw new ConflictException('Page location changed; retry the move');
-      }
-
-      let parentPageId = null;
-      if (currentPage.parentPageId === dto.parentPageId) {
-        parentPageId = undefined;
-      } else {
-        if (dto.parentPageId) {
-          const parentPage = await this.pageRepo.findById(dto.parentPageId, {
-            trx,
-          });
-          if (
-            !parentPage ||
-            parentPage.deletedAt ||
-            parentPage.spaceId !== currentPage.spaceId
-          ) {
-            throw new NotFoundException('Parent page not found');
-          }
-          if (
-            await this.pageRepo.isPageDescendant(
-              dto.pageId,
-              parentPage.id,
-              trx,
-            )
-          ) {
-            throw new BadRequestException(
-              'A page cannot be moved under its descendant',
-            );
-          }
-          parentPageId = parentPage.id;
+        const currentPage = await this.pageRepo.findById(dto.pageId, { trx });
+        if (!currentPage || currentPage.deletedAt) {
+          throw new NotFoundException('Moved page not found');
         }
-      }
+        if (currentPage.spaceId !== movedPage.spaceId) {
+          throw new ConflictException('Page location changed; retry the move');
+        }
 
-      await this.pageRepo.updatePage(
-        {
-          position: dto.position,
-          parentPageId: parentPageId,
-        },
-        dto.pageId,
-        trx,
-      );
-    });
+        let parentPageId = null;
+        if (currentPage.parentPageId === dto.parentPageId) {
+          parentPageId = undefined;
+        } else {
+          if (dto.parentPageId) {
+            const parentPage = await this.pageRepo.findById(dto.parentPageId, {
+              trx,
+            });
+            if (
+              !parentPage ||
+              parentPage.deletedAt ||
+              parentPage.spaceId !== currentPage.spaceId
+            ) {
+              throw new NotFoundException('Parent page not found');
+            }
+            if (
+              await this.pageRepo.isPageDescendant(
+                dto.pageId,
+                parentPage.id,
+                trx,
+              )
+            ) {
+              throw new BadRequestException(
+                'A page cannot be moved under its descendant',
+              );
+            }
+            parentPageId = parentPage.id;
+          }
+        }
+
+        await this.pageRepo.updatePage(
+          {
+            position: dto.position,
+            parentPageId: parentPageId,
+          },
+          dto.pageId,
+          trx,
+        );
+      },
+      existingTrx,
+    );
   }
 
   async getPageBreadCrumbs(childPageId: string) {
@@ -916,6 +974,7 @@ export class PageService {
             'position',
             'parentPageId',
             'spaceId',
+            'workspaceId',
             'deletedAt',
           ])
           .where('id', '=', childPageId)
@@ -932,6 +991,7 @@ export class PageService {
                 'p.position',
                 'p.parentPageId',
                 'p.spaceId',
+                'p.workspaceId',
                 'p.deletedAt',
               ])
               .innerJoin('page_ancestors as pa', 'pa.parentPageId', 'p.id')
@@ -958,147 +1018,137 @@ export class PageService {
 
   async getRecentSpacePages(
     spaceId: string,
-    userId: string,
+    user: User,
     pagination: PaginationOptions,
   ): Promise<CursorPaginationResult<Page>> {
-    const result = await this.pageRepo.getRecentPagesInSpace(
-      spaceId,
-      pagination,
-    );
-
-    if (result.items.length > 0) {
-      const pageIds = result.items.map((p) => p.id);
-      const accessibleIds =
-        await this.pagePermissionRepo.filterAccessiblePageIds({
-          pageIds,
-          userId,
-          spaceId,
-        });
-      const accessibleSet = new Set(accessibleIds);
-      result.items = result.items.filter((p) => accessibleSet.has(p.id));
-    }
-
-    return result;
+    return this.getAuthorizedPageList({ spaceId }, user, pagination);
   }
 
   async getRecentPages(
-    userId: string,
+    user: User,
     pagination: PaginationOptions,
   ): Promise<CursorPaginationResult<Page>> {
-    const result = await this.pageRepo.getRecentPages(userId, pagination);
-
-    if (result.items.length > 0) {
-      const pageIds = result.items.map((p) => p.id);
-      const accessibleIds =
-        await this.pagePermissionRepo.filterAccessiblePageIds({
-          pageIds,
-          userId,
-        });
-      const accessibleSet = new Set(accessibleIds);
-      result.items = result.items.filter((p) => accessibleSet.has(p.id));
-    }
-
-    return result;
+    return this.getAuthorizedPageList({ userId: user.id }, user, pagination);
   }
 
   async getCreatedByPages(
     creatorId: string,
-    requestingUserId: string,
+    requestingUser: User,
     pagination: PaginationOptions,
     spaceId?: string,
   ): Promise<CursorPaginationResult<Page>> {
-    const result = await this.pageRepo.getCreatedByPages(
-      creatorId,
-      requestingUserId,
+    return this.getAuthorizedPageList(
+      { creatorId, userId: requestingUser.id, spaceId },
+      requestingUser,
       pagination,
-      spaceId,
     );
-
-    if (result.items.length > 0) {
-      const pageIds = result.items.map((p) => p.id);
-      const accessibleIds =
-        await this.pagePermissionRepo.filterAccessiblePageIds({
-          pageIds,
-          userId: requestingUserId,
-        });
-      const accessibleSet = new Set(accessibleIds);
-      result.items = result.items.filter((p) => accessibleSet.has(p.id));
-    }
-
-    return result;
   }
 
   async getDeletedSpacePages(
     spaceId: string,
-    userId: string,
+    user: User,
     pagination: PaginationOptions,
   ): Promise<CursorPaginationResult<Page>> {
-    const result = await this.pageRepo.getDeletedPagesInSpace(
-      spaceId,
+    return this.getAuthorizedPageList(
+      { spaceId, deleted: true },
+      user,
       pagination,
+      'RESTORE',
     );
-
-    if (result.items.length > 0) {
-      const pageIds = result.items.map((p) => p.id);
-      const accessibleIds =
-        await this.pagePermissionRepo.filterAccessiblePageIds({
-          pageIds,
-          userId,
-          spaceId,
-        });
-      const accessibleSet = new Set(accessibleIds);
-      result.items = result.items.filter((p) => accessibleSet.has(p.id));
-    }
-
-    return result;
   }
 
-  async forceDelete(pageId: string, workspaceId: string): Promise<void> {
-    // Get all descendant IDs (including the page itself) using recursive CTE
-    const descendants = await this.db
-      .withRecursive('page_descendants', (db) =>
-        db
-          .selectFrom('pages')
-          .select(['id'])
-          .where('id', '=', pageId)
-          .unionAll((exp) =>
-            exp
-              .selectFrom('pages as p')
-              .select(['p.id'])
-              .innerJoin('page_descendants as pd', 'pd.id', 'p.parentPageId'),
-          ),
-      )
-      .selectFrom('page_descendants')
-      .selectAll()
-      .execute();
+  private async getAuthorizedPageList(
+    opts: {
+      spaceId?: string;
+      userId?: string;
+      creatorId?: string;
+      deleted?: boolean;
+    },
+    user: User,
+    pagination: PaginationOptions,
+    capability: LecCapability = 'VIEW',
+  ): Promise<CursorPaginationResult<Page>> {
+    const limit = pagination.limit;
+    const backwards = Boolean(pagination.beforeCursor && !pagination.cursor);
+    let cursor = pagination.cursor;
+    let beforeCursor = pagination.beforeCursor;
+    let exhausted = false;
+    let authorized: Array<
+      Pick<Page, 'id' | 'workspaceId'> & { $cursor: string }
+    > = [];
 
-    const pageIds = descendants.map((d) => d.id);
-
-    // Queue attachment deletion for all pages with unique job IDs to prevent duplicates
-    for (const id of pageIds) {
-      await this.attachmentQueue.add(
-        QueueJob.DELETE_PAGE_ATTACHMENTS,
-        {
-          pageId: id,
-        },
-        {
-          jobId: `delete-page-attachments-${id}`,
-          attempts: 3,
-          backoff: {
-            type: 'exponential',
-            delay: 5000,
-          },
-        },
+    for (;;) {
+      const batch = await this.pageRepo.findPageListCandidates(opts, {
+        limit: 100,
+        cursor,
+        beforeCursor,
+      } as PaginationOptions);
+      const candidates = batch.items;
+      if (candidates.length === 0) {
+        exhausted = true;
+        break;
+      }
+      const coreAllowed = await this.lecAuthorization.filterPages(
+        candidates,
+        user,
+        capability,
       );
+      const locallyAllowed =
+        await this.pagePermissionRepo.filterAccessiblePageIds({
+          pageIds: coreAllowed.map((page) => page.id),
+          userId: user.id,
+          spaceId: opts.spaceId,
+        });
+      const allowed = new Set(locallyAllowed);
+      const accepted = coreAllowed.filter((page) => allowed.has(page.id));
+      authorized = backwards
+        ? [...accepted, ...authorized]
+        : [...authorized, ...accepted];
+      if (authorized.length > limit) break;
+
+      if (backwards) {
+        beforeCursor = candidates[0].$cursor;
+        if (candidates.length < 100) exhausted = true;
+      } else {
+        cursor = batch.meta.nextCursor;
+        if (!cursor) exhausted = true;
+      }
+      if (exhausted) break;
     }
 
-    if (pageIds.length > 0) {
-      await this.db.deleteFrom('pages').where('id', 'in', pageIds).execute();
-      this.eventEmitter.emit(EventName.PAGE_DELETED, {
-        pageIds: pageIds,
-        workspaceId,
-      });
-    }
+    const selected = backwards
+      ? authorized.slice(-limit)
+      : authorized.slice(0, limit);
+    const pageIds = selected.map((page) => page.id);
+    const content = await this.pageRepo.findPageListContentByIds(
+      pageIds,
+      Boolean(opts.deleted),
+    );
+    const byId = new Map(content.map((page) => [page.id, page]));
+    const items = pageIds.map((id) => byId.get(id)).filter(Boolean) as Page[];
+    const hasMore = authorized.length > limit || !exhausted;
+
+    return {
+      items,
+      meta: {
+        limit,
+        hasNextPage: backwards ? Boolean(pagination.beforeCursor) : hasMore,
+        hasPrevPage: backwards ? hasMore : Boolean(pagination.cursor),
+        nextCursor:
+          (backwards ? Boolean(pagination.beforeCursor) : hasMore) &&
+          selected.length
+            ? selected[selected.length - 1].$cursor
+            : null,
+        prevCursor:
+          (backwards ? hasMore : Boolean(pagination.cursor)) && selected.length
+            ? selected[0].$cursor
+            : null,
+      },
+    };
+  }
+
+  forceDelete(pageId: string, workspaceId: string): Promise<void> {
+    return this.maintenance.forceDelete(pageId, workspaceId);
   }
 
   private async parseProsemirrorContent(

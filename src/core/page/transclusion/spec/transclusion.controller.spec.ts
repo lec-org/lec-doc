@@ -43,6 +43,6 @@ describe('TransclusionController.lookup', () => {
     const out = await controller.lookup({ references: [ref] } as any, user);
     expect(out.items[0]).not.toHaveProperty('status');
     expect((out.items[0] as any).content).toEqual({ type: 'doc' });
-    expect(service.lookup).toHaveBeenCalledWith([ref], 'u1', 'w1');
+    expect(service.lookup).toHaveBeenCalledWith([ref], user, 'w1');
   });
 });

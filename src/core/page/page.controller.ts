@@ -9,6 +9,7 @@ import {
   NotFoundException,
   Post,
   UseGuards,
+  ValidationPipe,
 } from '@nestjs/common';
 import { PageService } from './services/page.service';
 import { BacklinkService } from './services/backlink.service';
@@ -55,6 +56,21 @@ import {
 import { getPageTitle } from '../../common/helpers';
 import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
 import { LecResourceLifecycleService } from '../lec-authorization/lec-resource-lifecycle.service';
+import { LecPageControlService } from '../lec-authorization/lec-page-control.service';
+import { GrantPageViewDto } from '../lec-authorization/dto/page-grant.dto';
+import {
+  ClassifyPageDto,
+  RequestPageAccessDto,
+  ReviewPageAccessDto,
+  RevokePageAccessDto,
+  RevokePageGrantDto,
+  TransferPageOwnerDto,
+} from '../lec-authorization/dto/page-control.dto';
+
+const CONTROL_VALIDATION = new ValidationPipe({
+  whitelist: true,
+  forbidNonWhitelisted: true,
+});
 
 @UseGuards(JwtAuthGuard)
 @Controller('pages')
@@ -69,8 +85,86 @@ export class PageController {
     private readonly labelService: LabelService,
     private readonly lecAuthorization: LecAuthorizationService,
     private readonly lifecycle: LecResourceLifecycleService,
+    private readonly control: LecPageControlService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/grant-view')
+  @OAuthScope('write')
+  grantView(
+    @Body(CONTROL_VALIDATION)
+    dto: GrantPageViewDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.grantView(user, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/classify')
+  @OAuthScope('write')
+  classify(
+    @Body(CONTROL_VALIDATION)
+    dto: ClassifyPageDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.classify(user, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/transfer-owner')
+  @OAuthScope('write')
+  transferOwner(
+    @Body(CONTROL_VALIDATION)
+    dto: TransferPageOwnerDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.transferOwner(user, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/revoke-grant')
+  @OAuthScope('write')
+  revokeGrant(
+    @Body(CONTROL_VALIDATION)
+    dto: RevokePageGrantDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.revokeGrant(user, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/request-access')
+  @OAuthScope('write')
+  requestAccess(
+    @Body(CONTROL_VALIDATION)
+    dto: RequestPageAccessDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.requestAccess(user, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/review-access')
+  @OAuthScope('write')
+  reviewAccess(
+    @Body(CONTROL_VALIDATION)
+    dto: ReviewPageAccessDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.reviewAccess(user, dto);
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post('/revoke-access')
+  @OAuthScope('write')
+  revokeAccess(
+    @Body(CONTROL_VALIDATION)
+    dto: RevokePageAccessDto,
+    @AuthUser() user: User,
+  ) {
+    return this.control.revokeAccess(user, dto);
+  }
 
   @HttpCode(HttpStatus.OK)
   @Post('/info')
@@ -140,19 +234,12 @@ export class PageController {
 
     await this.pageAccessService.validateCanEdit(page, user);
 
-    return this.labelService.addLabelsToPage(
-      page.id,
-      dto.names,
-      workspace.id,
-    );
+    return this.labelService.addLabelsToPage(page.id, dto.names, workspace.id);
   }
 
   @HttpCode(HttpStatus.OK)
   @Post('labels/remove')
-  async removePageLabel(
-    @Body() dto: RemoveLabelDto,
-    @AuthUser() user: User,
-  ) {
+  async removePageLabel(@Body() dto: RemoveLabelDto, @AuthUser() user: User) {
     const page = await this.pageRepo.findById(dto.pageId);
     if (!page || page.deletedAt) {
       throw new NotFoundException('Page not found');
@@ -179,7 +266,7 @@ export class PageController {
     }
     await this.pageAccessService.validateCanView(page, user);
 
-    return this.backlinkService.countByPageId(page.id, user.id);
+    return this.backlinkService.countByPageId(page.id, user);
   }
 
   @HttpCode(HttpStatus.OK)
@@ -198,7 +285,7 @@ export class PageController {
     return this.backlinkService.findByPageId(
       page.id,
       dto.direction,
-      user.id,
+      user,
       pagination,
     );
   }
@@ -326,12 +413,28 @@ export class PageController {
     const ability = await this.spaceAbility.createForUser(user, page.spaceId);
 
     if (deletePageDto.permanentlyDelete) {
-      // Permanent deletion requires space admin permissions
       if (ability.cannot(SpaceCaslAction.Manage, SpaceCaslSubject.Settings)) {
         throw new ForbiddenException(
           'Only space admins can permanently delete pages',
         );
       }
+      const pages = await this.pageRepo.getPageAndDescendants(page.id, {
+        includeContent: false,
+        includeDeleted: true,
+      });
+      const decisions = await this.lecAuthorization.requireTree(
+        pages,
+        user,
+        'DELETE',
+      );
+      await this.lifecycle.requireDeletedTree(
+        workspace.id,
+        page.id,
+        decisions.map((decision) => ({
+          id: decision.resource_id,
+          resourceVersion: decision.resource_version,
+        })),
+      );
       await this.pageService.forceDelete(deletePageDto.pageId, workspace.id);
 
       this.auditService.log({
@@ -357,7 +460,10 @@ export class PageController {
         user,
         'DELETE',
       );
-      const principal = await this.lecAuthorization.principal(user, workspace.id);
+      const principal = await this.lecAuthorization.principal(
+        user,
+        workspace.id,
+      );
       if (principal.type !== 'OIDC') this.lecAuthorization.deny();
       await this.lifecycle.deleteTree(
         user,
@@ -462,12 +568,12 @@ export class PageController {
 
       return this.pageService.getRecentSpacePages(
         recentPageDto.spaceId,
-        user.id,
+        user,
         pagination,
       );
     }
 
-    return this.pageService.getRecentPages(user.id, pagination);
+    return this.pageService.getRecentPages(user, pagination);
   }
 
   @HttpCode(HttpStatus.OK)
@@ -480,17 +586,19 @@ export class PageController {
     const targetUserId = dto.userId ?? user.id;
 
     if (dto.spaceId) {
-      const ability = await this.spaceAbility.createForUser(
-        user,
-        dto.spaceId,
-      );
+      const ability = await this.spaceAbility.createForUser(user, dto.spaceId);
 
       if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Page)) {
         throw new ForbiddenException();
       }
     }
 
-    return this.pageService.getCreatedByPages(targetUserId, user.id, pagination, dto.spaceId);
+    return this.pageService.getCreatedByPages(
+      targetUserId,
+      user,
+      pagination,
+      dto.spaceId,
+    );
   }
 
   @HttpCode(HttpStatus.OK)
@@ -512,7 +620,7 @@ export class PageController {
 
       return this.pageService.getDeletedSpacePages(
         deletedPageDto.spaceId,
-        user.id,
+        user,
         pagination,
       );
     }
@@ -573,11 +681,12 @@ export class PageController {
     let spaceId = dto.spaceId;
 
     if (dto.pageId) {
-      const page = await this.pageRepo.findById(dto.pageId);
+      const page = await this.pageRepo.findAuthorizationSubject(dto.pageId);
       if (!page) {
         throw new ForbiddenException();
       }
 
+      await this.pageAccessService.validateCanView(page, user);
       spaceId = page.spaceId;
     }
 
@@ -595,7 +704,7 @@ export class PageController {
       spaceId,
       pagination,
       dto.pageId,
-      user.id,
+      user,
       spaceCanEdit,
     );
   }
@@ -603,69 +712,20 @@ export class PageController {
   @HttpCode(HttpStatus.OK)
   @Post('move-to-space')
   @OAuthScope('write')
-  async movePageToSpace(
-    @Body() dto: MovePageToSpaceDto,
-    @AuthUser() user: User,
-  ) {
-    const movedPage = await this.pageRepo.findById(dto.pageId);
-    if (!movedPage) {
-      throw new NotFoundException('Page to move not found');
-    }
-    if (movedPage.spaceId === dto.spaceId) {
-      throw new BadRequestException('Page is already in this space');
-    }
-
-    const abilities = await Promise.all([
-      this.spaceAbility.createForUser(user, movedPage.spaceId),
-      this.spaceAbility.createForUser(user, dto.spaceId),
-    ]);
-
-    if (
-      abilities.some((ability) =>
-        ability.cannot(SpaceCaslAction.Edit, SpaceCaslSubject.Page),
-      )
-    ) {
-      throw new ForbiddenException();
-    }
-
-    // Check page-level edit permission on the source page
-    await this.pageAccessService.validateCanEdit(movedPage, user);
-
-    // Moves only accessible pages; inaccessible child pages become root pages in original space
-    const { childPageIds } = await this.pageService.movePageToSpace(
-      movedPage,
-      dto.spaceId,
-      user.id,
+  movePageToSpace(@Body() _dto: MovePageToSpaceDto, @AuthUser() _user: User) {
+    throw new ForbiddenException(
+      'Lec Doc v1 does not permit moving pages between spaces',
     );
-
-    this.auditService.log({
-      event: AuditEvent.PAGE_MOVED_TO_SPACE,
-      resourceType: AuditResource.PAGE,
-      resourceId: movedPage.id,
-      spaceId: movedPage.spaceId,
-      changes: {
-        before: { spaceId: movedPage.spaceId },
-        after: { spaceId: dto.spaceId },
-      },
-      metadata: {
-        title: getPageTitle(movedPage.title),
-        ...(childPageIds.length > 0 && { childPageIds }),
-      },
-    });
   }
 
   @HttpCode(HttpStatus.OK)
   @Post('duplicate')
   @OAuthScope('write')
   async duplicatePage(@Body() dto: DuplicatePageDto, @AuthUser() user: User) {
-    const copiedPage = await this.pageRepo.findById(dto.pageId);
+    const copiedPage = await this.pageRepo.findAuthorizationSubject(dto.pageId);
     if (!copiedPage) {
       throw new NotFoundException('Page to copy not found');
     }
-
-    // Check page-level view permission on the source page (need to read to copy)
-    // Inaccessible child branches are automatically skipped during duplication
-    await this.pageAccessService.validateCanView(copiedPage, user);
 
     let result;
 
@@ -697,7 +757,7 @@ export class PageController {
         spaceId: dto.spaceId,
         metadata: {
           sourcePageId: copiedPage.id,
-          title: getPageTitle(copiedPage.title),
+          title: getPageTitle(result.title),
           sourceSpaceId: copiedPage.spaceId,
           targetSpaceId: dto.spaceId,
           ...(result.childPageIds.length > 0 && {
@@ -728,7 +788,7 @@ export class PageController {
         spaceId: copiedPage.spaceId,
         metadata: {
           sourcePageId: copiedPage.id,
-          title: getPageTitle(copiedPage.title),
+          title: getPageTitle(result.title),
           ...(result.childPageIds.length > 0 && {
             childPageIds: result.childPageIds,
           }),
@@ -757,8 +817,9 @@ export class PageController {
       throw new ForbiddenException();
     }
 
-    // Check page-level edit permission
-    await this.pageAccessService.validateCanEdit(movedPage, user);
+    // Local ACL narrows Core; the lifecycle obtains the authoritative source
+    // EDIT version immediately before prepare.
+    await this.pageAccessService.validateCanEdit(movedPage, user, false);
 
     // If moving to a new parent, check permission on the target parent
     if (dto.parentPageId && dto.parentPageId !== movedPage.parentPageId) {
@@ -769,7 +830,25 @@ export class PageController {
       await this.pageAccessService.validateCanEdit(targetParent, user);
     }
 
-    return this.pageService.movePage(dto, movedPage);
+    const principal = await this.lecAuthorization.principal(
+      user,
+      movedPage.workspaceId,
+    );
+    if (principal.type !== 'OIDC') this.lecAuthorization.deny();
+    const decision = await this.lecAuthorization.requirePage(
+      movedPage,
+      user,
+      'EDIT',
+    );
+    return this.lifecycle.movePage(
+      user,
+      principal,
+      movedPage.id,
+      decision.resource_version,
+      dto.parentPageId ? 'DOCMOST_PAGE' : 'DOCMOST_SPACE',
+      dto.parentPageId ?? movedPage.spaceId,
+      (trx) => this.pageService.movePage(dto, movedPage, trx),
+    );
   }
 
   @HttpCode(HttpStatus.OK)
@@ -781,7 +860,7 @@ export class PageController {
     }
 
     await this.pageAccessService.validateCanView(page, user);
-
-    return this.pageService.getPageBreadCrumbs(page.id);
+    const ancestors = await this.pageService.getPageBreadCrumbs(page.id);
+    return this.lecAuthorization.filterPages(ancestors, user);
   }
 }

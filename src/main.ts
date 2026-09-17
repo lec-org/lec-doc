@@ -23,7 +23,8 @@ async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({
-      trustProxy: true,
+      // Lec Doc accepts forwarded client metadata from its single ingress hop only.
+      trustProxy: 1,
       routerOptions: {
         maxParamLength: 1000,
         ignoreTrailingSlash: true,

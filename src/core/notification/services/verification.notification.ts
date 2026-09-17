@@ -44,10 +44,17 @@ export class VerificationNotificationService {
     userIds: string[],
     pageId: string,
     spaceId: string,
+    workspaceId: string,
   ): Promise<string[]> {
-    if (userIds.length === 0) return [];
+    const coreAuthorized =
+      await this.notificationService.filterRecipientsWithCoreView(
+        userIds,
+        pageId,
+        workspaceId,
+      );
+    if (coreAuthorized.size === 0) return [];
     const inSpace = await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-      userIds,
+      [...coreAuthorized],
       spaceId,
     );
     if (inSpace.size === 0) return [];
@@ -56,36 +63,55 @@ export class VerificationNotificationService {
     ]);
   }
 
+  private async getVerificationCandidate(verificationId: string) {
+    const [verification] = await this.db
+      .selectFrom('pageVerifications')
+      .leftJoin(
+        'pageVerifiers',
+        'pageVerifiers.pageVerificationId',
+        'pageVerifications.id',
+      )
+      .select([
+        'pageVerifications.id',
+        'pageVerifications.type',
+        'pageVerifications.expiresAt',
+        'pageVerifications.pageId',
+        'pageVerifications.spaceId',
+        'pageVerifications.workspaceId',
+      ])
+      .select((eb) =>
+        eb.fn
+          .agg<string[]>('array_agg', ['pageVerifiers.userId'])
+          .as('verifierIds'),
+      )
+      .where('pageVerifications.id', '=', verificationId)
+      .groupBy('pageVerifications.id')
+      .execute();
+    if (!verification) return null;
+    const verifierIds = verification.verifierIds.filter(Boolean);
+    if (verifierIds.length === 0) return null;
+    const recipients = await this.filterAccessibleRecipients(
+      verifierIds,
+      verification.pageId,
+      verification.spaceId,
+      verification.workspaceId,
+    );
+    if (recipients.length === 0) return null;
+    return { verification, recipients };
+  }
+
   async processVerificationExpiring(
     data: IVerificationExpiringNotificationJob,
     appUrl: string,
   ) {
-    const verification = await this.db
-      .selectFrom('pageVerifications')
-      .selectAll()
-      .where('id', '=', data.verificationId)
-      .executeTakeFirst();
+    const candidate = await this.getVerificationCandidate(data.verificationId);
+    if (!candidate) return;
 
-    if (!verification) return;
+    const { verification, recipients: accessibleVerifierIds } = candidate;
     if (verification.type !== 'expiring') return;
     if (!verification.expiresAt) return;
     const expiresAtMs = new Date(verification.expiresAt).getTime();
     if (expiresAtMs <= Date.now()) return;
-
-    const verifierRows = await this.db
-      .selectFrom('pageVerifiers')
-      .select('userId')
-      .where('pageVerificationId', '=', verification.id)
-      .execute();
-    const verifierIds = verifierRows.map((r) => r.userId);
-    if (verifierIds.length === 0) return;
-
-    const accessibleVerifierIds = await this.filterAccessibleRecipients(
-      verifierIds,
-      verification.pageId,
-      verification.spaceId,
-    );
-    if (accessibleVerifierIds.length === 0) return;
 
     const alreadyNotified = await this.getAlreadyNotifiedUserIds(
       verification.id,
@@ -117,6 +143,7 @@ export class VerificationNotificationService {
         data: { expiresAt: expiresAtIso },
       });
 
+      if (!notification) continue;
       const subject = `"${pageTitle}" needs to be re-verified soon`;
 
       await this.notificationService.queueEmail(
@@ -137,31 +164,13 @@ export class VerificationNotificationService {
     data: IVerificationExpiredNotificationJob,
     appUrl: string,
   ) {
-    const verification = await this.db
-      .selectFrom('pageVerifications')
-      .selectAll()
-      .where('id', '=', data.verificationId)
-      .executeTakeFirst();
+    const candidate = await this.getVerificationCandidate(data.verificationId);
+    if (!candidate) return;
 
-    if (!verification) return;
+    const { verification, recipients: accessibleVerifierIds } = candidate;
     if (verification.type !== 'expiring') return;
     if (!verification.expiresAt) return;
     if (new Date(verification.expiresAt).getTime() > Date.now()) return;
-
-    const verifierRows = await this.db
-      .selectFrom('pageVerifiers')
-      .select('userId')
-      .where('pageVerificationId', '=', verification.id)
-      .execute();
-    const verifierIds = verifierRows.map((r) => r.userId);
-    if (verifierIds.length === 0) return;
-
-    const accessibleVerifierIds = await this.filterAccessibleRecipients(
-      verifierIds,
-      verification.pageId,
-      verification.spaceId,
-    );
-    if (accessibleVerifierIds.length === 0) return;
 
     const alreadyNotified = await this.getAlreadyNotifiedUserIds(
       verification.id,
@@ -191,6 +200,7 @@ export class VerificationNotificationService {
         pageVerificationId: verification.id,
       });
 
+      if (!notification) continue;
       const subject = `"${pageTitle}" verification has expired`;
 
       await this.notificationService.queueEmail(
@@ -214,6 +224,7 @@ export class VerificationNotificationService {
       verifierIds,
       pageId,
       spaceId,
+      workspaceId,
     );
     if (accessibleVerifierIds.length === 0) return;
 
@@ -240,6 +251,7 @@ export class VerificationNotificationService {
       verifierIds,
       pageId,
       spaceId,
+      workspaceId,
     );
     if (accessibleVerifierIds.length === 0) return;
 
@@ -259,6 +271,7 @@ export class VerificationNotificationService {
         spaceId,
       });
 
+      if (!notification) continue;
       const subject = `"${pageTitle}" needs your approval`;
 
       await this.notificationService.queueEmail(
@@ -286,6 +299,7 @@ export class VerificationNotificationService {
       [requestedById],
       pageId,
       spaceId,
+      workspaceId,
     );
     if (recipients.length === 0) return;
 
@@ -304,6 +318,7 @@ export class VerificationNotificationService {
       spaceId,
     });
 
+    if (!notification) return;
     const subject = `"${pageTitle}" was returned for revision`;
 
     await this.notificationService.queueEmail(
@@ -350,6 +365,10 @@ export class VerificationNotificationService {
     if (!page || !space) return null;
 
     const basePageUrl = `${appUrl}/s/${space.slug}/p/${page.slugId}`;
-    return { pageTitle: getPageTitle(page.title), spaceName: space.name ?? space.slug, basePageUrl };
+    return {
+      pageTitle: getPageTitle(page.title),
+      spaceName: space.name ?? space.slug,
+      basePageUrl,
+    };
   }
 }

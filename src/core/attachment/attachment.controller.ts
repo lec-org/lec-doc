@@ -67,6 +67,7 @@ import {
   AUDIT_SERVICE,
   IAuditService,
 } from '../../integrations/audit/audit.service';
+import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
 
 @Controller()
 export class AttachmentController {
@@ -83,6 +84,7 @@ export class AttachmentController {
     private readonly tokenService: TokenService,
     private readonly pageAccessService: PageAccessService,
     private readonly domainService: DomainService,
+    private readonly lecAuthorization: LecAuthorizationService,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
   ) {}
 
@@ -261,6 +263,11 @@ export class AttachmentController {
     ) {
       throw new NotFoundException('File not found');
     }
+
+    const page = await this.pageRepo.findById(attachment.pageId);
+    if (!page) throw new NotFoundException('File not found');
+    const [view] = await this.lecAuthorization.page(page, null, ['VIEW']);
+    if (!view?.allowed) this.lecAuthorization.deny();
 
     try {
       return await this.sendFileResponse(req, res, attachment, 'public');

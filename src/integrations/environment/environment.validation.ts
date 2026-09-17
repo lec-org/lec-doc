@@ -100,7 +100,9 @@ export class EnvironmentVariables {
   TURBOPUFFER_REGION: string;
 
   @IsOptional()
-  @ValidateIf((obj) => obj.TURBOPUFFER_BASE_URL != '' && obj.TURBOPUFFER_BASE_URL != null)
+  @ValidateIf(
+    (obj) => obj.TURBOPUFFER_BASE_URL != '' && obj.TURBOPUFFER_BASE_URL != null,
+  )
   @IsUrl({ protocols: ['http', 'https'], require_tld: false })
   TURBOPUFFER_BASE_URL: string;
 
@@ -111,6 +113,29 @@ export class EnvironmentVariables {
       'TURBOPUFFER_NAMESPACE_PREFIX may only contain letters, digits, dot, dash, underscore (max 90 chars)',
   })
   TURBOPUFFER_NAMESPACE_PREFIX: string;
+
+  @ValidateIf(
+    (obj) => obj.LEC_IM_NOTIFICATION_URL || obj.LEC_DOC_NOTIFICATION_TOKEN,
+  )
+  @IsUrl({ protocols: ['http', 'https'], require_tld: false })
+  LEC_IM_NOTIFICATION_URL: string;
+
+  @ValidateIf(
+    (obj) => obj.LEC_IM_NOTIFICATION_URL || obj.LEC_DOC_NOTIFICATION_TOKEN,
+  )
+  @IsString()
+  @MinLength(32)
+  LEC_DOC_NOTIFICATION_TOKEN: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(32)
+  LEC_DOC_REVOCATION_TOKEN: string;
+
+  @ValidateIf((obj) => obj.LEC_CORE_URL || obj.LEC_DOC_OIDC_ISSUER)
+  @IsString()
+  @IsNotEmpty()
+  LEC_INTERNAL_CA_FILE: string;
 
   @IsOptional()
   @IsString()

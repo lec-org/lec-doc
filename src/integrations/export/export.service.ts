@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { jsonToHtml, jsonToNode } from '../../collaboration/collaboration.util';
 import { ExportFormat } from './dto/export-dto';
-import { Page } from '@docmost/db/types/entity.types';
+import { Page, User } from '@docmost/db/types/entity.types';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import * as JSZip from 'jszip';
@@ -39,8 +39,16 @@ import {
   getProsemirrorContent,
 } from '../../common/helpers/prosemirror/utils';
 import { htmlToMarkdown } from '@lec/doc-editor';
+import { LecAuthorizationService } from '../../core/lec-authorization/lec-authorization.service';
+import { collectReferencesFromPmJson } from '../../core/page/transclusion/utils/transclusion-prosemirror.util';
 
-type AllowedAttachment = { id: string; fileName: string; filePath: string };
+type AllowedAttachment = {
+  id: string;
+  fileName: string;
+  filePath: string;
+  pageId: string | null;
+  workspaceId: string;
+};
 
 @Injectable()
 export class ExportService {
@@ -53,9 +61,20 @@ export class ExportService {
     private readonly storageService: StorageService,
     private readonly environmentService: EnvironmentService,
     private readonly domainService: DomainService,
+    private readonly lecAuthorization: LecAuthorizationService,
   ) {}
 
-  async exportPage(format: string, page: Page, singlePage?: boolean) {
+  async exportPage(
+    format: string,
+    page: Page,
+    singlePage?: boolean,
+    user?: User,
+    ignorePermissions = false,
+  ) {
+    if (!ignorePermissions) {
+      if (!user) this.lecAuthorization.deny();
+      await this.lecAuthorization.requirePage(page, user, 'VIEW');
+    }
     const titleNode = {
       type: 'heading',
       attrs: { level: 1 },
@@ -66,10 +85,18 @@ export class ExportService {
 
     if (singlePage) {
       const baseUrl = await this.getWorkspaceBaseUrl(page.workspaceId);
-      prosemirrorJson = await this.turnPageMentionsToLinks(
+      const pageContent = await this.authorizeTransclusionSources(
         getProsemirrorContent(page.content),
         page.workspaceId,
+        user,
+        ignorePermissions,
+      );
+      prosemirrorJson = await this.turnPageMentionsToLinks(
+        pageContent,
+        page.workspaceId,
         baseUrl,
+        user,
+        ignorePermissions,
       );
     } else {
       // mentions is already turned to links during the zip process
@@ -108,42 +135,44 @@ export class ExportService {
     format: string,
     includeAttachments: boolean,
     includeChildren: boolean,
-    userId?: string,
+    user?: User,
     ignorePermissions = false,
   ) {
-    let pages: Page[];
+    let candidates = includeChildren
+      ? await this.pageRepo.findPageTreeCandidates(pageId)
+      : [await this.pageRepo.findAuthorizationSubject(pageId)].filter(Boolean);
 
-    if (includeChildren) {
-      //@ts-ignore
-      pages = await this.pageRepo.getPageAndDescendants(pageId, {
-        includeContent: true,
-      });
-    } else {
-      // Only fetch the single page when includeChildren is false
-      const page = await this.pageRepo.findById(pageId, {
-        includeContent: true,
-      });
-      if (page) {
-        pages = [page];
-      }
-    }
-
-    if (!pages || pages.length === 0) {
+    if (candidates.length === 0) {
       throw new BadRequestException('No pages to export');
     }
 
-    if (!ignorePermissions && userId) {
-      pages = await this.filterPagesForExport(
-        pages,
+    if (!ignorePermissions) {
+      if (!user) this.lecAuthorization.deny();
+      candidates = await this.lecAuthorization.filterPages(candidates, user);
+      candidates = await this.filterPagesForExport(
+        candidates as Page[],
         pageId,
-        userId,
-        pages[0].spaceId,
+        user.id,
+        candidates[0]?.spaceId,
       );
-      if (pages.length === 0) {
+      if (candidates.length === 0) {
         throw new BadRequestException('No accessible pages to export');
       }
     }
 
+    if (!ignorePermissions) {
+      candidates = await this.lecAuthorization.filterPages(candidates, user);
+      if (candidates.length === 0) {
+        throw new BadRequestException('No accessible pages to export');
+      }
+    }
+    const content = await this.pageRepo.findExportPagesByIds(
+      candidates.map((page) => page.id),
+    );
+    const contentById = new Map(content.map((page) => [page.id, page]));
+    const pages = candidates
+      .map((page) => contentById.get(page.id))
+      .filter(Boolean) as Page[];
     const parentPageIndex = pages.findIndex((obj) => obj.id === pageId);
 
     //After filtering by permissions, if the root page itself is not accessible to the user, findIndex returns -1
@@ -156,7 +185,13 @@ export class ExportService {
     const isSinglePage = pages.length === 1 && !includeAttachments;
 
     if (isSinglePage) {
-      const pageContent = await this.exportPage(format, pages[0], true);
+      const pageContent = await this.exportPage(
+        format,
+        pages[0],
+        true,
+        user,
+        ignorePermissions,
+      );
       return { type: 'file' as const, content: pageContent, page: pages[0] };
     }
 
@@ -170,7 +205,7 @@ export class ExportService {
       zip,
       includeAttachments,
       baseUrl,
-      userId,
+      user,
       ignorePermissions,
     );
 
@@ -187,7 +222,7 @@ export class ExportService {
     spaceId: string,
     format: string,
     includeAttachments: boolean,
-    userId?: string,
+    user?: User,
     ignorePermissions = false,
   ) {
     const space = await this.db
@@ -200,38 +235,35 @@ export class ExportService {
       throw new NotFoundException('Space not found');
     }
 
-    let pages = await this.db
-      .selectFrom('pages')
-      .select([
-        'pages.id',
-        'pages.slugId',
-        'pages.title',
-        'pages.icon',
-        'pages.position',
-        'pages.content',
-        'pages.parentPageId',
-        'pages.spaceId',
-        'pages.workspaceId',
-        'pages.createdAt',
-        'pages.updatedAt',
-      ])
-      .where('spaceId', '=', spaceId)
-      .where('deletedAt', 'is', null)
-      .execute();
+    let candidates = await this.pageRepo.findSpacePageCandidates(spaceId);
 
-    if (!ignorePermissions && userId) {
-      pages = await this.filterPagesForExport(
-        pages as Page[],
+    if (!ignorePermissions) {
+      if (!user) this.lecAuthorization.deny();
+      candidates = await this.lecAuthorization.filterPages(candidates, user);
+      candidates = await this.filterPagesForExport(
+        candidates as Page[],
         null,
-        userId,
+        user.id,
         spaceId,
       );
-      if (pages.length === 0) {
+      if (candidates.length === 0) {
         throw new BadRequestException('No accessible pages to export');
       }
     }
 
-    const tree = buildTree(pages as Page[]);
+    if (!ignorePermissions) {
+      candidates = await this.lecAuthorization.filterPages(candidates, user);
+      if (candidates.length === 0) {
+        throw new BadRequestException('No accessible pages to export');
+      }
+    }
+    const pages = (await this.pageRepo.findExportPagesByIds(
+      candidates.map((page) => page.id),
+    )) as Page[];
+    if (pages.length === 0) {
+      throw new BadRequestException('No accessible pages to export');
+    }
+    const tree = buildTree(pages);
 
     const baseUrl = await this.getWorkspaceBaseUrl(pages[0].workspaceId);
     const zip = new JSZip();
@@ -242,7 +274,7 @@ export class ExportService {
       zip,
       includeAttachments,
       baseUrl,
-      userId,
+      user,
       ignorePermissions,
     );
 
@@ -266,7 +298,7 @@ export class ExportService {
     zip: JSZip,
     includeAttachments: boolean,
     baseUrl: string,
-    userId?: string,
+    user?: User,
     ignorePermissions = false,
   ): Promise<void> {
     const slugIdToPath: Record<string, string> = {};
@@ -278,7 +310,7 @@ export class ExportService {
     // Batch resolve attachments once for the whole export so we only run the
     // owning-page view check a single time, regardless of page count.
     const allowedAttachments = includeAttachments
-      ? await this.resolveAccessibleAttachments(tree, userId, ignorePermissions)
+      ? await this.resolveAccessibleAttachments(tree, user, ignorePermissions)
       : new Map<string, AllowedAttachment>();
 
     const stack: { folder: JSZip; parentPageId: string | null }[] = [
@@ -292,11 +324,21 @@ export class ExportService {
       for (const page of children) {
         const childPages = tree[page.id] || [];
 
-        const prosemirrorJson = await this.turnPageMentionsToLinks(
+        if (!ignorePermissions) {
+          if (!user) this.lecAuthorization.deny();
+          await this.lecAuthorization.requirePage(page, user, 'VIEW');
+        }
+        const pageContent = await this.authorizeTransclusionSources(
           getProsemirrorContent(page.content),
           page.workspaceId,
+          user,
+          ignorePermissions,
+        );
+        const prosemirrorJson = await this.turnPageMentionsToLinks(
+          pageContent,
+          page.workspaceId,
           baseUrl,
-          userId,
+          user,
           ignorePermissions,
         );
 
@@ -310,16 +352,28 @@ export class ExportService {
         );
 
         if (includeAttachments) {
-          await this.zipAttachments(updatedJsonContent, folder, allowedAttachments);
+          await this.zipAttachments(
+            updatedJsonContent,
+            folder,
+            allowedAttachments,
+            user,
+            ignorePermissions,
+          );
           updatedJsonContent =
             updateAttachmentUrlsToLocalPaths(updatedJsonContent);
         }
 
         const pageTitle = getSafePageTitle(page.title);
-        const pageExportContent = await this.exportPage(format, {
-          ...page,
-          content: updatedJsonContent,
-        });
+        const pageExportContent = await this.exportPage(
+          format,
+          { ...page, content: updatedJsonContent },
+          false,
+          user,
+          true,
+        );
+        if (!ignorePermissions) {
+          await this.lecAuthorization.requirePage(page, user, 'VIEW');
+        }
 
         folder.file(
           `${pageTitle}${getExportExtension(format)}`,
@@ -353,6 +407,15 @@ export class ExportService {
       pages: pagesMetadata,
     };
 
+    if (!ignorePermissions) {
+      if (!user) this.lecAuthorization.deny();
+      const exportedPages = Object.values(tree).flat();
+      await Promise.all(
+        exportedPages.map((page) =>
+          this.lecAuthorization.requirePage(page, user, 'VIEW'),
+        ),
+      );
+    }
     zip.file('docmost-metadata.json', JSON.stringify(metadata, null, 2));
   }
 
@@ -360,6 +423,8 @@ export class ExportService {
     prosemirrorJson: any,
     zip: JSZip,
     allowed: Map<string, AllowedAttachment>,
+    user?: User,
+    ignorePermissions = false,
   ) {
     const attachmentIds = getAttachmentIds(prosemirrorJson);
 
@@ -367,6 +432,19 @@ export class ExportService {
       attachmentIds.map(async (id) => {
         const attachment = allowed.get(id);
         if (!attachment) return;
+        if (!ignorePermissions) {
+          if (!attachment.pageId) return;
+          if (!user) this.lecAuthorization.deny();
+          await this.lecAuthorization.requirePage(
+            {
+              id: attachment.pageId,
+              workspaceId: attachment.workspaceId,
+              deletedAt: null,
+            },
+            user,
+            'VIEW',
+          );
+        }
         try {
           const fileBuffer = await this.storageService.read(
             attachment.filePath,
@@ -382,7 +460,7 @@ export class ExportService {
 
   private async resolveAccessibleAttachments(
     tree: PageExportTree,
-    userId: string | undefined,
+    user: User | undefined,
     ignorePermissions: boolean,
   ): Promise<Map<string, AllowedAttachment>> {
     const allAttachmentIds = new Set<string>();
@@ -390,7 +468,13 @@ export class ExportService {
     for (const siblings of Object.values(tree)) {
       for (const page of siblings) {
         if (!spaceId) spaceId = page.spaceId;
-        for (const id of getAttachmentIds(getProsemirrorContent(page.content))) {
+        if (!ignorePermissions) {
+          if (!user) this.lecAuthorization.deny();
+          await this.lecAuthorization.requirePage(page, user, 'VIEW');
+        }
+        for (const id of getAttachmentIds(
+          getProsemirrorContent(page.content),
+        )) {
           allAttachmentIds.add(id);
         }
       }
@@ -402,24 +486,29 @@ export class ExportService {
 
     const attachments = await this.db
       .selectFrom('attachments')
-      .select(['id', 'fileName', 'filePath', 'pageId'])
+      .select(['id', 'fileName', 'filePath', 'pageId', 'workspaceId'])
       .where('id', 'in', [...allAttachmentIds])
       .where('spaceId', '=', spaceId)
       .execute();
 
     let visible = attachments;
-    if (!ignorePermissions && userId) {
+    if (!ignorePermissions) {
+      if (!user) this.lecAuthorization.deny();
       const ownerPageIds = [
         ...new Set(
-          attachments
-            .map((a) => a.pageId)
-            .filter((id): id is string => !!id),
+          attachments.map((a) => a.pageId).filter((id): id is string => !!id),
         ),
       ];
-      const accessible = ownerPageIds.length
+      const subjects =
+        await this.pageRepo.findAuthorizationSubjectsByIds(ownerPageIds);
+      const coreAllowed = await this.lecAuthorization.filterPages(
+        subjects,
+        user,
+      );
+      const accessible = coreAllowed.length
         ? await this.pagePermissionRepo.filterAccessiblePageIds({
-            pageIds: ownerPageIds,
-            userId,
+            pageIds: coreAllowed.map((page) => page.id),
+            userId: user.id,
             spaceId,
           })
         : [];
@@ -432,11 +521,57 @@ export class ExportService {
     return new Map(visible.map((a) => [a.id, a]));
   }
 
+  private async authorizeTransclusionSources(
+    prosemirrorJson: any,
+    workspaceId: string,
+    user: User | undefined,
+    ignorePermissions: boolean,
+  ) {
+    if (ignorePermissions) return prosemirrorJson;
+    if (!user) this.lecAuthorization.deny();
+
+    const references = collectReferencesFromPmJson(prosemirrorJson);
+    if (references.length === 0) return prosemirrorJson;
+
+    const sourceIds = [...new Set(references.map((ref) => ref.sourcePageId))];
+    const subjects =
+      await this.pageRepo.findAuthorizationSubjectsByIds(sourceIds);
+    const subjectsById = new Map(subjects.map((page) => [page.id, page]));
+    const orderedSubjects = sourceIds
+      .map((id) => subjectsById.get(id))
+      .filter(Boolean);
+    const coreAllowed = await this.lecAuthorization.filterPages(
+      orderedSubjects,
+      user,
+      'VIEW',
+    );
+    const localAllowed = coreAllowed.length
+      ? await this.pagePermissionRepo.filterAccessiblePageIds({
+          pageIds: coreAllowed.map((page) => page.id),
+          userId: user.id,
+        })
+      : [];
+    const allowed = new Set(localAllowed);
+
+    const redact = (node: any): any => {
+      if (!node || typeof node !== 'object') return node;
+      if (node.type === 'transclusionReference') {
+        return allowed.has(node.attrs?.sourcePageId)
+          ? node
+          : { type: 'paragraph' };
+      }
+      if (!Array.isArray(node.content)) return node;
+      return { ...node, content: node.content.map(redact) };
+    };
+
+    return redact(prosemirrorJson);
+  }
+
   async turnPageMentionsToLinks(
     prosemirrorJson: any,
     workspaceId: string,
     baseUrl: string,
-    userId?: string,
+    user?: User,
     ignorePermissions = false,
   ) {
     const doc = jsonToNode(prosemirrorJson);
@@ -456,10 +591,17 @@ export class ExportService {
     }
 
     // Filter to only accessible pages if permissions are enforced
-    if (!ignorePermissions && userId) {
+    if (!ignorePermissions) {
+      if (!user) this.lecAuthorization.deny();
+      const subjects =
+        await this.pageRepo.findAuthorizationSubjectsByIds(pageMentionIds);
+      const coreAllowed = await this.lecAuthorization.filterPages(
+        subjects,
+        user,
+      );
       pageMentionIds = await this.pagePermissionRepo.filterAccessiblePageIds({
-        pageIds: pageMentionIds,
-        userId,
+        pageIds: coreAllowed.map((page) => page.id),
+        userId: user.id,
       });
     }
 

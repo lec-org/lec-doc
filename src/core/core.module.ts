@@ -23,6 +23,7 @@ import { LabelModule } from './label/label.module';
 import { NotificationModule } from './notification/notification.module';
 import { WatcherModule } from './watcher/watcher.module';
 import { FavoriteModule } from './favorite/favorite.module';
+import { PageLikeModule } from './page-like/page-like.module';
 import { SessionModule } from './session/session.module';
 import { ClsMiddleware } from 'nestjs-cls';
 
@@ -35,6 +36,7 @@ import { ClsMiddleware } from 'nestjs-cls';
     AttachmentModule,
     CommentModule,
     FavoriteModule,
+    PageLikeModule,
     SearchModule,
     SpaceModule,
     GroupModule,

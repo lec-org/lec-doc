@@ -15,7 +15,7 @@ export class SearchDTO {
 
   @IsOptional()
   @IsUUID()
-  spaceId: string;
+  spaceId?: string;
 
   @IsOptional()
   @IsString()
@@ -50,7 +50,7 @@ export class SearchShareDTO extends SearchDTO {
 
   @IsOptional()
   @IsUUID()
-  spaceId: string;
+  spaceId?: string;
 }
 
 export class SearchPublicSpaceDTO extends SearchDTO {
