@@ -63,7 +63,7 @@ export class LecOidcClient {
       'lec-doc',
       {
         client_secret: this.config.getOrThrow<string>('LEC_DOC_CLIENT_SECRET'),
-        id_token_signed_response_alg: 'RS256',
+        id_token_signed_response_alg: 'ES384',
         [oidc.clockTolerance]: 5,
       },
       undefined,

@@ -13,19 +13,19 @@ jest.mock('node:fs', () => ({
   ),
 }));
 
-const issuer = 'https://sso.example.test/realms/lec';
-const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const issuer = 'https://sso.example.test/oidc';
+const keys = generateKeyPairSync('ec', { namedCurve: 'secp384r1' });
 const jwk = {
   ...keys.publicKey.export({ format: 'jwk' }),
   kid: 'test-key',
   use: 'sig',
-  alg: 'RS256',
+  alg: 'ES384',
 };
 function signedToken(claims: Record<string, unknown>): string {
-  const payload = [{ alg: 'RS256', kid: 'test-key' }, claims]
+  const payload = [{ alg: 'ES384', kid: 'test-key' }, claims]
     .map((value) => Buffer.from(JSON.stringify(value)).toString('base64url'))
     .join('.');
-  return `${payload}.${sign('RSA-SHA256', Buffer.from(payload), keys.privateKey).toString('base64url')}`;
+  return `${payload}.${sign('SHA384', Buffer.from(payload), { key: keys.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
 }
 const metadata = {
   issuer,
@@ -35,7 +35,7 @@ const metadata = {
   userinfo_endpoint: `${issuer}/userinfo`,
   response_types_supported: ['code'],
   subject_types_supported: ['public'],
-  id_token_signing_alg_values_supported: ['RS256'],
+  id_token_signing_alg_values_supported: ['ES384'],
   code_challenge_methods_supported: ['S256'],
 };
 
@@ -50,7 +50,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
     discoveryMetadata = { ...metadata };
     agent
       .get('https://sso.example.test')
-      .intercept({ path: '/realms/lec/.well-known/openid-configuration' })
+      .intercept({ path: '/oidc/.well-known/openid-configuration' })
       .reply(200, () => JSON.stringify(discoveryMetadata), {
         headers: { 'content-type': 'application/json' },
       })
@@ -94,7 +94,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
     agent
       .get('https://sso.example.test')
       .intercept({
-        path: '/realms/lec/userinfo',
+        path: '/oidc/userinfo',
         headers: { authorization: 'Bearer desktop-access-token' },
       })
       .reply(200, {
@@ -117,7 +117,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
     const { transaction } = await client.begin();
     const now = Math.floor(Date.now() / 1000);
     const pool = agent.get('https://sso.example.test');
-    pool.intercept({ path: '/realms/lec/token', method: 'POST' }).reply(
+    pool.intercept({ path: '/oidc/token', method: 'POST' }).reply(
       200,
       {
         access_token: 'private-access-token',
@@ -137,7 +137,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
       { headers: { 'content-type': 'application/json' } },
     );
     pool
-      .intercept({ path: '/realms/lec/certs' })
+      .intercept({ path: '/oidc/certs' })
       .reply(
         200,
         { keys: [jwk] },
@@ -178,7 +178,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
     const { transaction } = await client.begin();
     const now = Math.floor(Date.now() / 1000);
     const pool = agent.get('https://sso.example.test');
-    pool.intercept({ path: '/realms/lec/token', method: 'POST' }).reply(
+    pool.intercept({ path: '/oidc/token', method: 'POST' }).reply(
       200,
       {
         access_token: 'private-access-token',
@@ -198,7 +198,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
       { headers: { 'content-type': 'application/json' } },
     );
     pool
-      .intercept({ path: '/realms/lec/certs' })
+      .intercept({ path: '/oidc/certs' })
       .reply(
         200,
         { keys: [jwk] },
@@ -235,7 +235,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
       }),
     ).toString('base64url');
     const pool = agent.get('https://sso.example.test');
-    pool.intercept({ path: '/realms/lec/token', method: 'POST' }).reply(
+    pool.intercept({ path: '/oidc/token', method: 'POST' }).reply(
       200,
       {
         access_token: 'private-access-token',
@@ -245,7 +245,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
       { headers: { 'content-type': 'application/json' } },
     );
     pool
-      .intercept({ path: '/realms/lec/certs' })
+      .intercept({ path: '/oidc/certs' })
       .reply(
         200,
         { keys: [jwk] },
