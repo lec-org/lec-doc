@@ -34,7 +34,7 @@ const url = process.env.LEC_DOC_TEST_REDIS_URL;
     const issued = await handoffs.issue(
       workspaceId,
       {
-        issuer: 'https://id.example.test/realms/lec',
+        issuer: 'https://id.example.test/oidc',
         subject: 'desktop-subject',
         email: 'desktop@example.test',
         name: 'Desktop User',

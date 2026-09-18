@@ -17,7 +17,7 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     organizationId,
     defaultSpaceName: '常规',
     defaultSpaceSlug: 'general',
-    ownerIssuer: 'https://id.example.test/realms/lec',
+    ownerIssuer: 'https://id.example.test/oidc',
     ownerSubject: 'owner-subject',
     ownerEmail: 'owner@example.test',
     ownerName: '文档 Owner',
@@ -154,7 +154,7 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
         db,
         new ConfigService({
           LEC_DOC_ORGANIZATION_ID: organizationId,
-          LEC_DOC_OIDC_ISSUER: 'https://other.example.test/realms/lec',
+          LEC_DOC_OIDC_ISSUER: 'https://other.example.test/oidc',
         }),
       ).bootstrap(input),
     ).rejects.toThrow('issuer does not match');

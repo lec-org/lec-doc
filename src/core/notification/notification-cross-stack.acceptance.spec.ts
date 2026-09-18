@@ -25,7 +25,7 @@ import { LecImNotificationDeliveryService } from './lec-im-notification-delivery
 const docUrl = process.env.LEC_DOC_TEST_DATABASE_URL;
 const imUrl = process.env.LEC_IM_TEST_DATABASE_URL;
 
-const issuer = 'https://id.example.test/realms/lec';
+const issuer = 'https://id.example.test/oidc';
 const subject = 'recipient-subject';
 const token = 'document-notification-acceptance-token';
 const genericText = '你获得了一篇云文档的访问权限';

@@ -97,7 +97,7 @@ The image does not copy or build a frontend client. The supported parent topolog
 | 变量 | 用途 |
 | --- | --- |
 | `APP_URL` | 浏览器访问的精确 HTTPS origin，不带末尾 `/` |
-| `LEC_DOC_OIDC_ISSUER` | LecSSO 的 HTTPS realm issuer |
+| `LEC_DOC_OIDC_ISSUER` | LecSSO/Logto 的 HTTPS issuer |
 | `LEC_DOC_CLIENT_SECRET` | 与 LecSSO confidential client 对应的 secret |
 | `ALLOWED_PRIVATE_NETWORKS` | 内网 IdP 所需的明确 CIDR 白名单，默认拒绝私有地址 |
 

@@ -28,7 +28,7 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
   let workspaceId: string;
   let groupId: string;
   const principal = {
-    issuer: 'https://sso.example.test/realms/lec',
+    issuer: 'https://sso.example.test/oidc',
     subject: 'subject-1',
     email: 'user@example.test',
     name: '测试用户',

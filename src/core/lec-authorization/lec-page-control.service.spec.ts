@@ -22,7 +22,7 @@ const recipient = {
 };
 const dto = {
   pageId: page.id,
-  subjectIssuer: 'https://id.example.test/realms/lec',
+  subjectIssuer: 'https://id.example.test/oidc',
   subject: 'recipient-subject',
   operationId: '60000000-0000-4000-8000-000000000001',
   expectedVersion: 2,
@@ -42,7 +42,7 @@ function service(
     action: 'GRANT_VIEW',
     status: 'CORE_PENDING',
     actorUserId: actor.id,
-    actorIssuer: 'https://id.example.test/realms/lec',
+    actorIssuer: 'https://id.example.test/oidc',
     actorSubject: 'actor-subject',
     recipientUserId: recipient.id,
     recipientIssuer: dto.subjectIssuer,
@@ -90,7 +90,7 @@ function service(
           .fn()
           .mockResolvedValue({
             type: 'OIDC',
-            issuer: 'https://id.example.test/realms/lec',
+            issuer: 'https://id.example.test/oidc',
             subject: 'actor-subject',
           }),
         deny: jest.fn(),
@@ -107,7 +107,7 @@ function service(
 describe('Lec page control wrappers', () => {
   const principal = {
     type: 'OIDC' as const,
-    issuer: 'https://id.example.test/realms/lec',
+    issuer: 'https://id.example.test/oidc',
     subject: 'actor-subject',
   };
   const coreResource = {

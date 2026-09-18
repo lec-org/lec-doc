@@ -24,7 +24,7 @@ describe('Desktop subject-bound handoff', () => {
     );
     const workspaceId = '10000000-0000-4000-8000-000000000001';
     const principal = {
-      issuer: 'https://id.example.test/realms/lec',
+      issuer: 'https://id.example.test/oidc',
       subject: 'desktop-user',
       email: 'desktop@example.test',
       name: 'Desktop User',
@@ -66,7 +66,7 @@ describe('Desktop subject-bound handoff', () => {
     const issued = await service.issue(
       workspaceId,
       {
-        issuer: 'https://id.example.test/realms/lec',
+        issuer: 'https://id.example.test/oidc',
         subject: 'desktop-user',
         email: 'desktop@example.test',
         name: 'Desktop User',

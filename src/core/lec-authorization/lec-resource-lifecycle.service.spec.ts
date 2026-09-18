@@ -6,7 +6,7 @@ import { LecPolicyClient } from './lec-policy.client';
 
 const principal = {
   type: 'OIDC' as const,
-  issuer: 'https://sso.example.test/realms/lec',
+  issuer: 'https://sso.example.test/oidc',
   subject: 'owner-subject',
 };
 

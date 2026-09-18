@@ -24,7 +24,7 @@ const organization = '01995ad0-2222-7111-8111-111111111111';
 const page = '01995ad0-3333-7111-8111-111111111111';
 const principal = {
   type: 'OIDC' as const,
-  issuer: 'https://sso.example.test/realms/lec',
+  issuer: 'https://sso.example.test/oidc',
   subject: 'member',
 };
 const item = {
