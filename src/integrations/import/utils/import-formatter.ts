@@ -4,7 +4,6 @@ import * as path from 'path';
 import { v7 } from 'uuid';
 import { InsertableBacklink } from '@docmost/db/types/entity.types';
 import { Cheerio, CheerioAPI, load } from 'cheerio';
-import slugify from '@sindresorhus/slugify';
 import { normalizeTableColumnWidths } from './table-utils';
 
 // Check if text contains Unicode characters (for emojis/icons)
@@ -24,7 +23,6 @@ export async function formatImportHtml(opts: {
   workspaceId: string;
   pageDir?: string;
   attachmentCandidates?: string[];
-  spaceSlug?: string;
 }): Promise<{
   html: string;
   backlinks: InsertableBacklink[];
@@ -62,7 +60,6 @@ export async function formatImportHtml(opts: {
     creatorId,
     sourcePageId,
     workspaceId,
-    opts.spaceSlug,
   );
 
   return {
@@ -338,7 +335,6 @@ export async function rewriteInternalLinksToMentionHtml(
   creatorId: string,
   sourcePageId: string,
   workspaceId: string,
-  spaceSlug?: string,
 ): Promise<InsertableBacklink[]> {
   const normalize = (p: string) => p.replace(/\\/g, '/');
   const backlinks: InsertableBacklink[] = [];
@@ -383,13 +379,7 @@ export async function rewriteInternalLinksToMentionHtml(
         .text(meta.title);
       $a.replaceWith($mention);
     } else {
-      const titleSlug = slugify(meta.title?.substring(0, 70) || 'untitled');
-      const pageSlug = `${titleSlug}-${meta.slugId}`;
-      const internalHref = spaceSlug
-        ? `/s/${spaceSlug}/p/${pageSlug}`
-        : `/p/${pageSlug}`;
-
-      $a.attr('href', internalHref);
+      $a.attr('href', `/wiki/${meta.slugId}`);
       $a.attr('data-internal', 'true');
     }
 

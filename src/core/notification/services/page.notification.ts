@@ -402,7 +402,7 @@ export class PageNotificationService {
 
     const pageUpdates = pages.map((p) => ({
       title: getPageTitle(p.title),
-      url: `${appUrl}/s/${p.spaceSlug}/p/${p.slugId}`,
+      url: `${appUrl}/wiki/${p.slugId}`,
       updatedBy: [...(pageActors.get(p.id) ?? [])],
     }));
 
@@ -448,7 +448,7 @@ export class PageNotificationService {
       return null;
     }
 
-    const basePageUrl = `${appUrl}/s/${space.slug}/p/${page.slugId}`;
+    const basePageUrl = `${appUrl}/wiki/${page.slugId}`;
 
     return {
       actor,

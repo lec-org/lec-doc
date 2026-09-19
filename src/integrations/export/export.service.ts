@@ -29,7 +29,6 @@ import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { Node } from '@tiptap/pm/model';
 import { EditorState } from '@tiptap/pm/state';
-import slugify from '@sindresorhus/slugify';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const packageJson = require('../../../package.json');
 import { EnvironmentService } from '../environment/environment.service';
@@ -641,13 +640,10 @@ export class ExportService {
       pos: number,
       title: string,
       slugId: string,
-      spaceSlug: string,
+      _spaceSlug: string,
     ) => {
       const linkTitle = title || 'untitled';
-      const truncatedTitle = linkTitle?.substring(0, 70);
-      const pageSlug = `${slugify(truncatedTitle)}-${slugId}`;
-
-      const link = `${baseUrl}/s/${spaceSlug}/p/${pageSlug}`;
+      const link = `${baseUrl}/wiki/${slugId}`;
 
       // Create a link mark and a text node with that mark
       const linkMark = editorState.schema.marks.link.create({ href: link });

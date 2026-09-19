@@ -364,7 +364,7 @@ export class VerificationNotificationService {
 
     if (!page || !space) return null;
 
-    const basePageUrl = `${appUrl}/s/${space.slug}/p/${page.slugId}`;
+    const basePageUrl = `${appUrl}/wiki/${page.slugId}`;
     return {
       pageTitle: getPageTitle(page.title),
       spaceName: space.name ?? space.slug,

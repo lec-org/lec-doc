@@ -215,7 +215,7 @@ export class CommentNotificationService {
       return null;
     }
 
-    const pageUrl = `${appUrl}/s/${space.slug}/p/${page.slugId}`;
+    const pageUrl = `${appUrl}/wiki/${page.slugId}`;
 
     return { actor, pageTitle: getPageTitle(page.title), pageUrl };
   }
