@@ -7,7 +7,7 @@ import { RedisService } from '@nestjs-labs/nestjs-ioredis';
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { EncryptionService } from '../../integrations/encryption/encryption.service';
-import { LecOidcPrincipal } from './lec-oidc.client';
+import { LecTenantPrincipal } from './lec-oidc.client';
 
 const accountGeneration = z.string().min(1).max(128);
 const handoffSchema = z.strictObject({
@@ -16,6 +16,10 @@ const handoffSchema = z.strictObject({
   subject: z.string().min(1).max(255),
   email: z.email(),
   name: z.string().min(1).max(255),
+  realName: z.string().trim().min(1).max(255),
+  avatarUrl: z.string().url().nullable().optional(),
+  organizationId: z.uuid(),
+  tenantRole: z.enum(['owner', 'admin', 'member']),
   accountGeneration,
   origin: z.url(),
 });
@@ -30,7 +34,7 @@ export class LecDesktopHandoffService {
 
   async issue(
     workspaceId: string,
-    principal: LecOidcPrincipal,
+    principal: LecTenantPrincipal,
     generation: string,
     origin: string,
   ) {

@@ -68,6 +68,16 @@ export const resourceSchema = z.strictObject({
 });
 export type LecResource = z.infer<typeof resourceSchema>;
 export const resourceEnvelopeSchema = z.strictObject({ data: resourceSchema });
+export const reviewAccessEnvelopeSchema = z.strictObject({
+  data: resourceSchema.extend({
+    access_request_id: z.uuid(),
+    decision: z.enum(['APPROVE', 'REJECT']),
+    user_issuer: z.url(),
+    user_subject: z.string().min(1).max(255),
+    expires_at: z.iso.datetime({ offset: true }).nullable(),
+  }),
+});
+export type LecReviewAccess = z.infer<typeof reviewAccessEnvelopeSchema>['data'];
 export const reparentEnvelopeSchema = z.strictObject({
   data: resourceSchema.extend({
     operation_id: z.uuid(),

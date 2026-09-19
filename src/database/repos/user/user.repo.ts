@@ -98,6 +98,16 @@ export class UserRepo {
       .execute();
   }
 
+  async hasLecIdentity(userId: string, workspaceId: string): Promise<boolean> {
+    const identity = await this.db
+      .selectFrom('lecIdentities')
+      .select('userId')
+      .where('userId', '=', userId)
+      .where('workspaceId', '=', workspaceId)
+      .executeTakeFirst();
+    return Boolean(identity);
+  }
+
   async updateLastLogin(userId: string, workspaceId: string) {
     return await this.db
       .updateTable('users')
@@ -124,7 +134,7 @@ export class UserRepo {
       password: opts?.passwordless
         ? null
         : await hashPassword(insertableUser.password),
-      locale: 'en-US',
+      locale: 'zh-CN',
       role: insertableUser?.role,
       lastLoginAt: new Date(),
     };

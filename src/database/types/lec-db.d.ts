@@ -32,8 +32,14 @@ export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
 export interface LecCoreRevocationInbox {
   createdAt: Generated<Timestamp>;
+  effect: Generated<string>;
+  entitlementId: string | null;
   eventId: string;
+  expiresAt: Timestamp | null;
+  projectedAt: Timestamp | null;
   publishedAt: Timestamp | null;
+  recipientIssuer: string | null;
+  recipientSubject: string | null;
   resourceId: string;
   resourceKind: string;
   resourceVersion: Int8;
@@ -57,6 +63,28 @@ export interface LecIdentities {
   createdAt: Generated<Timestamp>;
   issuer: string;
   subject: string;
+  userId: string;
+  workspaceId: string;
+}
+
+export interface LecPageGrantProjections {
+  createdAt: Generated<Timestamp>;
+  expiresAt: Timestamp | null;
+  grantId: string;
+  pageId: string;
+  revokedAt: Timestamp | null;
+  sourceVersion: Generated<Int8>;
+  userId: string;
+  workspaceId: string;
+}
+
+export interface LecPageAccessProjections {
+  accessRequestId: string;
+  createdAt: Generated<Timestamp>;
+  expiresAt: Timestamp;
+  pageId: string;
+  revokedAt: Timestamp | null;
+  sourceVersion: Generated<Int8>;
   userId: string;
   workspaceId: string;
 }
@@ -118,7 +146,9 @@ export interface DB {
   lecCoreRevocationInbox: LecCoreRevocationInbox;
   lecDocumentNotificationOutbox: LecDocumentNotificationOutbox;
   lecIdentities: LecIdentities;
+  lecPageAccessProjections: LecPageAccessProjections;
   lecPageControlOperations: LecPageControlOperations;
+  lecPageGrantProjections: LecPageGrantProjections;
   lecResourceOperations: LecResourceOperations;
   pageLikes: PageLikes;
 }

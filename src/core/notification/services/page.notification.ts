@@ -60,20 +60,8 @@ export class PageNotificationService {
       );
     if (coreAuthorized.size === 0) return;
 
-    const usersWithSpaceAccess =
-      await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-        [...coreAuthorized],
-        spaceId,
-      );
-
-    const usersWithPageAccess =
-      await this.pagePermissionRepo.getUserIdsWithPageAccess(pageId, [
-        ...usersWithSpaceAccess,
-      ]);
-    const usersWithAccess = new Set(usersWithPageAccess);
-
     const accessibleMentions = newMentions.filter((m) =>
-      usersWithAccess.has(m.userId),
+      coreAuthorized.has(m.userId),
     );
     if (accessibleMentions.length === 0) return;
 
@@ -153,21 +141,13 @@ export class PageNotificationService {
       );
     if (coreAuthorized.size === 0) return;
 
-    const usersWithSpaceAccess =
-      await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-        [...coreAuthorized],
-        spaceId,
-      );
-
-    if (usersWithSpaceAccess.size === 0) return;
-
     const context = await this.getPageContext(actorId, pageId, spaceId, appUrl);
     if (!context) return;
 
     const { actor, pageTitle, basePageUrl } = context;
     const accessLabel = role === 'writer' ? 'edit' : 'view';
 
-    for (const userId of usersWithSpaceAccess) {
+    for (const userId of coreAuthorized) {
       const notification = await this.notificationService.create({
         userId,
         workspaceId,
@@ -234,19 +214,10 @@ export class PageNotificationService {
     const afterCooldown = afterPrefs.filter((id) => !recentlyNotified.has(id));
     if (afterCooldown.length === 0) return;
 
-    const usersWithSpaceAccess =
-      await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-        afterCooldown,
-        spaceId,
-      );
-
-    const usersWithPageAccess =
-      await this.pagePermissionRepo.getUserIdsWithPageAccess(pageId, [
-        ...usersWithSpaceAccess,
-      ]);
-    if (usersWithPageAccess.length === 0) return;
-
-    const recipientIds = new Set(usersWithPageAccess);
+    const recipientIds = new Set(
+      afterCooldown.filter((userId) => coreAuthorized.has(userId)),
+    );
+    if (recipientIds.size === 0) return;
     const actorId = actorIds[0];
 
     const context = await this.getPageContext(actorId, pageId, spaceId, appUrl);

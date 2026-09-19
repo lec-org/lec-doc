@@ -18,6 +18,7 @@ import { GroupRepo } from '../../database/repos/group/group.repo';
 import { SpaceRepo } from '../../database/repos/space/space.repo';
 import { SpaceMemberRepo } from '../../database/repos/space/space-member.repo';
 import { PagePermissionRepo } from '../../database/repos/page/page-permission.repo';
+import { PageRepo } from '../../database/repos/page/page.repo';
 import SpaceAbilityFactory from '../casl/abilities/space-ability.factory';
 import { PageAccessService } from '../page/page-access/page-access.service';
 
@@ -363,7 +364,7 @@ const enabled = required.every((name) => process.env[name]);
     await db.deleteFrom('pages').where('id', '=', pageId).execute();
   }, 60_000);
 
-  it('真实 Core grant 写入本地 reader 投影并创建一条通知/IM intent', async () => {
+  it('真实 Core grant 只写页面 reader 投影并创建一条通知/IM intent', async () => {
     const user = { id: userId, workspaceId } as never;
     const pageId = randomUUID();
     await lifecycle.createPage(
@@ -414,7 +415,7 @@ const enabled = required.every((name) => process.env[name]);
     );
     const notifications = new NotificationService(
       new NotificationRepo(db, spaceMembers),
-      pagePermissions,
+      new PageRepo(db, spaceMembers, { emit: jest.fn() } as never),
       { server: { to: () => ({ emit: jest.fn() }) } } as never,
       {} as never,
       db,
@@ -466,11 +467,27 @@ const enabled = required.every((name) => process.env[name]);
     expect(
       await db
         .selectFrom('spaceMembers')
-        .select(['userId', 'role'])
+        .select('id')
         .where('spaceId', '=', spaceId)
         .where('userId', '=', recipientId)
+        .executeTakeFirst(),
+    ).toBeUndefined();
+    expect(
+      await db
+        .selectFrom('lecPageGrantProjections')
+        .select(['grantId', 'pageId', 'userId'])
+        .where('grantId', '=', operationId)
         .executeTakeFirstOrThrow(),
-    ).toEqual({ userId: recipientId, role: 'reader' });
+    ).toEqual({ grantId: operationId, pageId, userId: recipientId });
+    expect(
+      await db
+        .selectFrom('pagePermissions')
+        .innerJoin('pageAccess', 'pageAccess.id', 'pagePermissions.pageAccessId')
+        .select('pagePermissions.id')
+        .where('pageAccess.pageId', '=', pageId)
+        .where('pagePermissions.userId', '=', recipientId)
+        .executeTakeFirst(),
+    ).toBeUndefined();
     expect(
       await db
         .selectFrom('notifications')

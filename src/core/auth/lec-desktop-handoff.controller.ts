@@ -17,6 +17,7 @@ import { EnvironmentService } from '../../integrations/environment/environment.s
 import { LecBrowserSecurity } from './lec-browser-security';
 import { LecDesktopHandoffService } from './lec-desktop-handoff.service';
 import { LecIdentityService } from './lec-identity.service';
+import { LecCoreProfileClient } from './lec-core-profile.client';
 import { LecOidcClient } from './lec-oidc.client';
 import { SessionService } from '../session/session.service';
 
@@ -33,6 +34,7 @@ export class LecDesktopHandoffController {
     private readonly oidc: LecOidcClient,
     private readonly handoffs: LecDesktopHandoffService,
     private readonly identities: LecIdentityService,
+    private readonly coreProfile: LecCoreProfileClient,
     private readonly sessions: SessionService,
     private readonly environment: EnvironmentService,
     private readonly security: LecBrowserSecurity,
@@ -46,8 +48,10 @@ export class LecDesktopHandoffController {
   ) {
     if (!authorization?.startsWith('Bearer '))
       throw new UnauthorizedException('valid bearer token required');
-    const principal = await this.oidc.identityFromAccessToken(
-      authorization.slice(7).trim(),
+    const accessToken = authorization.slice(7).trim();
+    const principal = await this.coreProfile.principalFromAccessToken(
+      accessToken,
+      await this.oidc.identityFromAccessToken(accessToken),
     );
     await this.identities.resolve(workspace.id, principal);
     const issued = await this.handoffs.issue(

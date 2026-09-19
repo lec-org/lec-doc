@@ -178,6 +178,7 @@ export class PublicSpaceController {
     if (!space || space.deletedAt) {
       throw new NotFoundException('Space not found');
     }
+    if (space.isPersonal) throw new ForbiddenException();
 
     const ability = await this.spaceAbility.createForUser(user, space.id);
     if (ability.cannot(SpaceCaslAction.Manage, SpaceCaslSubject.Settings)) {
@@ -198,6 +199,7 @@ export class PublicSpaceController {
     if (!space || space.deletedAt) {
       throw new NotFoundException('Space not found');
     }
+    if (space.isPersonal) throw new ForbiddenException();
 
     const ability = await this.spaceAbility.createForUser(user, space.id);
     if (ability.cannot(SpaceCaslAction.Manage, SpaceCaslSubject.Settings)) {

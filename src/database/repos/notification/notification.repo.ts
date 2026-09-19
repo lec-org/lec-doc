@@ -50,6 +50,20 @@ export class NotificationRepo {
             'in',
             this.spaceMemberRepo.getUserSpaceIdsQuery(userId),
           ),
+          eb.exists(
+            eb
+              .selectFrom('lecPageGrantProjections')
+              .select('grantId')
+              .whereRef('lecPageGrantProjections.pageId', '=', 'notifications.pageId')
+              .where('lecPageGrantProjections.userId', '=', userId)
+              .where('lecPageGrantProjections.revokedAt', 'is', null)
+              .where((grant) =>
+                grant.or([
+                  grant('lecPageGrantProjections.expiresAt', 'is', null),
+                  grant('lecPageGrantProjections.expiresAt', '>', new Date()),
+                ]),
+              ),
+          ),
         ]),
       );
 
@@ -74,7 +88,22 @@ export class NotificationRepo {
     if (notificationIds.length === 0) return [];
     return this.db
       .selectFrom('notifications')
-      .selectAll('notifications')
+      .select([
+        'notifications.id',
+        'notifications.userId',
+        'notifications.workspaceId',
+        'notifications.type',
+        'notifications.actorId',
+        'notifications.pageId',
+        'notifications.commentId',
+        'notifications.pageVerificationId',
+        'notifications.data',
+        'notifications.readAt',
+        'notifications.emailedAt',
+        'notifications.archivedAt',
+        'notifications.createdAt',
+      ])
+      .select((eb) => this.visibleSpaceId(eb))
       .select((eb) => this.withActor(eb))
       .select((eb) => this.withPage(eb))
       .select((eb) => this.withSpace(eb))
@@ -202,12 +231,63 @@ export class NotificationRepo {
     ).as('page');
   }
 
+  visibleSpaceId(eb: ExpressionBuilder<DB, 'notifications'>) {
+    return eb
+      .case()
+      .when(eb.exists(this.visibleSpaceQuery(eb)))
+      .then(eb.ref('notifications.spaceId'))
+      .else(null)
+      .end()
+      .as('spaceId');
+  }
+
+  private visibleSpaceQuery(eb: ExpressionBuilder<DB, 'notifications'>) {
+    return eb
+      .selectFrom('spaces')
+      .select('spaces.id')
+      .whereRef('spaces.id', '=', 'notifications.spaceId')
+      .where((space) =>
+        space.or([
+          space('spaces.creatorId', '=', space.ref('notifications.userId')),
+          space.and([
+            space('spaces.isPersonal', '=', false),
+            space.exists(
+              space
+                .selectFrom('spaceMembers')
+                .leftJoin(
+                  'groupUsers',
+                  'groupUsers.groupId',
+                  'spaceMembers.groupId',
+                )
+                .select('spaceMembers.id')
+                .whereRef('spaceMembers.spaceId', '=', 'spaces.id')
+                .where((member) =>
+                  member.or([
+                    member(
+                      'spaceMembers.userId',
+                      '=',
+                      member.ref('notifications.userId'),
+                    ),
+                    member(
+                      'groupUsers.userId',
+                      '=',
+                      member.ref('notifications.userId'),
+                    ),
+                  ]),
+                ),
+            ),
+          ]),
+        ]),
+      );
+  }
+
   withSpace(eb: ExpressionBuilder<DB, 'notifications'>) {
     return jsonObjectFrom(
-      eb
-        .selectFrom('spaces')
-        .select(['spaces.id', 'spaces.name', 'spaces.slug'])
-        .whereRef('spaces.id', '=', 'notifications.spaceId'),
+      this.visibleSpaceQuery(eb).select([
+        'spaces.id',
+        'spaces.name',
+        'spaces.slug',
+      ]),
     ).as('space');
   }
 }

@@ -14,12 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { User } from '@docmost/db/types/entity.types';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import { PageRepo } from '@docmost/db/repos/page/page.repo';
-import { sql } from 'kysely';
 import { z } from 'zod';
-import {
-  PagePermissionRole,
-  SpaceRole,
-} from '../../common/helpers/types/permission';
 import { NotificationType } from '../notification/notification.constants';
 import { NotificationService } from '../notification/notification.service';
 import { GrantPageViewDto } from './dto/page-grant.dto';
@@ -38,6 +33,7 @@ import {
   accessRequestEnvelopeSchema,
   LecPrincipal,
   resourceEnvelopeSchema,
+  reviewAccessEnvelopeSchema,
 } from './lec-policy.types';
 
 type ControlOperation = Awaited<ReturnType<LecPageControlService['operation']>>;
@@ -91,12 +87,20 @@ export class LecPageControlService {
   }
 
   async reviewAccess(actor: User, input: ReviewPageAccessDto) {
-    return this.control(actor, input, 'doc-control/review-access', {
-      access_request_id: input.accessRequestId,
-      decision: input.decision,
-      expires_at:
-        input.decision === 'APPROVE' ? input.expiresAt?.toISOString() : null,
-    });
+    const { page, principal } = await this.context(actor, input.pageId);
+    return this.strictCommand(
+      'doc-control/review-access',
+      {
+        ...this.identity(page, principal),
+        expected_version: input.expectedVersion,
+        operation_id: input.operationId,
+        access_request_id: input.accessRequestId,
+        decision: input.decision,
+        expires_at:
+          input.decision === 'APPROVE' ? input.expiresAt?.toISOString() : null,
+      },
+      reviewAccessEnvelopeSchema,
+    );
   }
 
   async revokeAccess(actor: User, input: RevokePageAccessDto) {
@@ -129,11 +133,11 @@ export class LecPageControlService {
     );
   }
 
-  private async strictCommand<T extends { data: unknown }>(
+  private async strictCommand<T>(
     path: Parameters<LecPolicyClient['send']>[0],
     payload: unknown,
-    schema: z.ZodType<T>,
-  ) {
+    schema: z.ZodType<{ data: T }>,
+  ): Promise<T> {
     try {
       return (await this.policy.send(path, payload, schema)).data;
     } catch (error) {
@@ -218,6 +222,8 @@ export class LecPageControlService {
       .execute();
 
     const operation = await this.operation(input.operationId);
+    if (operation.status === 'FAILED')
+      throw new ConflictException('control operation failed');
     if (
       operation.workspaceId !== page.workspaceId ||
       operation.pageId !== page.id ||
@@ -232,7 +238,14 @@ export class LecPageControlService {
       throw new ConflictException('control operation idempotency conflict');
 
     await this.advance(operation);
-    return { operationId: operation.id, status: 'DONE' as const };
+    const settled = await this.operation(operation.id);
+    return {
+      operationId: operation.id,
+      status:
+        settled.status === 'DONE'
+          ? ('DONE' as const)
+          : ('LOCAL_PENDING' as const),
+    };
   }
 
   @Interval('lec-page-control-reconciliation', 5_000)
@@ -302,55 +315,23 @@ export class LecPageControlService {
       if (operation.status === 'LOCAL_PENDING') {
         if (!operation.actorUserId || !operation.recipientUserId)
           throw new ForbiddenException();
-        const localPageAccessId = await this.db
-          .transaction()
-          .execute(async (trx) => {
-            await trx
-              .insertInto('spaceMembers')
-              .values({
-                spaceId: operation.spaceId,
-                userId: operation.recipientUserId,
-                role: SpaceRole.READER,
-                addedById: operation.actorUserId,
-              })
-              .onConflict((oc) =>
-                oc.columns(['spaceId', 'userId']).doUpdateSet({
-                  deletedAt: null,
-                  updatedAt: sql`now()`,
-                }),
-              )
-              .execute();
-            const access = await trx
-              .selectFrom('pageAccess')
-              .select('id')
-              .where('pageId', '=', operation.pageId)
-              .executeTakeFirst();
-            if (access) {
-              await trx
-                .insertInto('pagePermissions')
-                .values({
-                  id: operation.id,
-                  pageAccessId: access.id,
-                  userId: operation.recipientUserId,
-                  role: PagePermissionRole.READER,
-                  addedById: operation.actorUserId,
-                })
-                .onConflict((oc) =>
-                  oc.columns(['pageAccessId', 'userId']).doUpdateSet({
-                    role: PagePermissionRole.READER,
-                    addedById: operation.actorUserId,
-                    updatedAt: sql`now()`,
-                  }),
-                )
-                .execute();
-            }
-            return access?.id ?? null;
-          });
+        const projection = await this.db
+          .selectFrom('lecPageGrantProjections')
+          .select('grantId')
+          .where('grantId', '=', operation.id)
+          .where('pageId', '=', operation.pageId)
+          .where('userId', '=', operation.recipientUserId)
+          .where('revokedAt', 'is', null)
+          .executeTakeFirst();
+        if (!projection) {
+          await this.recordFailure(operation, this.unavailable());
+          return;
+        }
         await this.db
           .updateTable('lecPageControlOperations')
           .set({
             status: 'NOTIFICATION_PENDING',
-            localPageAccessId,
+            localPageAccessId: null,
             updatedAt: new Date(),
           })
           .where('id', '=', operation.id)

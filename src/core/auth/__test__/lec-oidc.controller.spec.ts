@@ -11,6 +11,7 @@ import { LecOidcController } from '../lec-oidc.controller';
 import { LecOidcClient } from '../lec-oidc.client';
 import { LecOidcTransactions } from '../lec-oidc-transactions';
 import { LecIdentityService } from '../lec-identity.service';
+import { LecCoreProfileClient } from '../lec-core-profile.client';
 import { LecBrowserSecurity } from '../lec-browser-security';
 import { SessionService } from '../../session/session.service';
 import { EnvironmentService } from '../../../integrations/environment/environment.service';
@@ -25,7 +26,7 @@ describe('OIDC HTTP 入口', () => {
       url: 'https://sso.example.test/auth',
       transaction: { state, nonce: 'n'.repeat(43), verifier: 'v'.repeat(43) },
     }),
-    complete: jest.fn(),
+    completeWithAccessToken: jest.fn(),
   };
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -46,6 +47,10 @@ describe('OIDC HTTP 入口', () => {
         { provide: LecOidcClient, useValue: oidc },
         { provide: LecOidcTransactions, useValue: transactions },
         { provide: LecIdentityService, useValue: { resolve: jest.fn() } },
+        {
+          provide: LecCoreProfileClient,
+          useValue: { principalFromAccessToken: jest.fn((_token, principal) => principal) },
+        },
         {
           provide: SessionService,
           useValue: { rotateSessionAndToken: jest.fn() },
@@ -85,7 +90,7 @@ describe('OIDC HTTP 入口', () => {
       secure: true,
       httpOnly: true,
       sameSite: 'Lax',
-      path: '/api/auth/oidc/callback',
+      path: '/',
       maxAge: 300,
     });
     expect(transactions.save).toHaveBeenCalledWith(
@@ -112,11 +117,14 @@ describe('OIDC HTTP 入口', () => {
       verifier: 'v'.repeat(43),
     };
     transactions.consume.mockResolvedValue(transaction);
-    oidc.complete.mockResolvedValue({
-      issuer: 'https://sso.example.test',
-      subject: 'subject-1',
-      email: 'user@example.test',
-      name: '测试用户',
+    oidc.completeWithAccessToken.mockResolvedValue({
+      accessToken: 'private-access-token',
+      principal: {
+        issuer: 'https://sso.example.test',
+        subject: 'subject-1',
+        email: 'user@example.test',
+        name: '测试用户',
+      },
     });
     const user = { id: 'user-1', workspaceId: 'workspace-1' } as User;
     jest.spyOn(app.get(LecIdentityService), 'resolve').mockResolvedValue(user);

@@ -106,6 +106,49 @@ const controls = [
   ],
 ] as const;
 
+describe('PageController container authorization', () => {
+  it('returns no breadcrumbs and never loads ancestors for page-only access', async () => {
+    const page = {
+      id: CONTROL_DTO.pageId,
+      workspaceId: USER.workspaceId,
+      spaceId: '50000000-0000-4000-8000-000000000001',
+    };
+    const pageService = { getPageBreadCrumbs: jest.fn() };
+    const pageRepo = { findById: jest.fn().mockResolvedValue(page) };
+    const pageAccess = { validateCanView: jest.fn().mockResolvedValue(undefined) };
+    const core = {
+      requireSpace: jest.fn().mockRejectedValue(new ForbiddenException()),
+      filterPages: jest.fn(),
+    };
+    const controller = new PageController(
+      pageService as any,
+      pageRepo as any,
+      {} as any,
+      { createForUser: jest.fn() } as any,
+      pageAccess as any,
+      {} as any,
+      {} as any,
+      core as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      controller.getPageBreadcrumbs({ pageId: page.id }, USER),
+    ).resolves.toEqual([]);
+    expect(pageAccess.validateCanView).toHaveBeenCalledWith(page, USER);
+    expect(core.requireSpace).toHaveBeenCalledWith(
+      page.spaceId,
+      page.workspaceId,
+      USER,
+      'VIEW',
+    );
+    expect(pageService.getPageBreadCrumbs).not.toHaveBeenCalled();
+    expect(core.filterPages).not.toHaveBeenCalled();
+  });
+});
+
 describe('PageController public control API', () => {
   it.each(controls)(
     'forwards valid %s requests with the authenticated user',

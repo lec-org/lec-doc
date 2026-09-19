@@ -39,15 +39,15 @@ async function main() {
       ownerName: env.LEC_DOC_BOOTSTRAP_OWNER_NAME,
     });
     // The durable operation exists before Core is called. Failure is safe to retry.
-    await app.get(LecResourceLifecycleService).ensureSpaceBound(
-      { id: result.ownerUserId, workspaceId: result.workspaceId },
-      {
-        type: 'OIDC',
-        issuer: new URL(env.LEC_DOC_BOOTSTRAP_OWNER_ISSUER).href,
-        subject: env.LEC_DOC_BOOTSTRAP_OWNER_SUBJECT,
-      },
-      result.spaceId,
-    );
+    const lifecycle = app.get(LecResourceLifecycleService);
+    const principal = {
+      type: 'OIDC' as const,
+      issuer: new URL(env.LEC_DOC_BOOTSTRAP_OWNER_ISSUER).href,
+      subject: env.LEC_DOC_BOOTSTRAP_OWNER_SUBJECT,
+    };
+    const owner = { id: result.ownerUserId, workspaceId: result.workspaceId };
+    await lifecycle.ensureSpaceBound(owner, principal, result.spaceId);
+    await lifecycle.ensureSpaceBound(owner, principal, result.personalSpaceId);
     process.stdout.write(
       `${JSON.stringify({ ...result, coreBinding: 'done' })}\n`,
     );

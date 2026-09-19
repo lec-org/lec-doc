@@ -17,18 +17,14 @@ describe('Collaboration online Core authorization', () => {
   };
   const users = { findById: jest.fn().mockResolvedValue(user) };
   const pages = { findById: jest.fn().mockResolvedValue(page) };
-  const members = {
-    getUserSpaceRoles: jest.fn().mockResolvedValue([{ role: 'admin' }]),
-  };
-  const permissions = {
-    canUserEditPage: jest.fn().mockResolvedValue({
-      hasAnyRestriction: false,
-      canAccess: true,
-      canEdit: true,
-    }),
-  };
 
   it('requires online VIEW and EDIT before authenticating a writable socket', async () => {
+    const local = {
+      localPermissions: jest.fn().mockResolvedValue({
+        canEdit: true,
+        hasRestriction: false,
+      }),
+    };
     const authorization = {
       page: jest.fn().mockResolvedValue([
         { capability: 'VIEW', allowed: true },
@@ -40,8 +36,7 @@ describe('Collaboration online Core authorization', () => {
       token as any,
       users as any,
       pages as any,
-      members as any,
-      permissions as any,
+      local as any,
       authorization as any,
     );
     const data = {
@@ -56,13 +51,20 @@ describe('Collaboration online Core authorization', () => {
       spaceId: page.spaceId,
     });
     expect(data.connectionConfig.readOnly).toBe(true);
+    expect(local.localPermissions).toHaveBeenCalledWith(page, user);
     expect(authorization.page).toHaveBeenCalledWith(page, user, [
       'VIEW',
       'EDIT',
     ]);
   });
 
-  it('rechecks Core on sync, updates, awareness and persistence', async () => {
+  it('rechecks Core and local entitlement on every socket operation', async () => {
+    const local = {
+      localPermissions: jest.fn().mockResolvedValue({
+        canEdit: true,
+        hasRestriction: false,
+      }),
+    };
     const authorization = {
       page: jest.fn(),
       requirePage: jest.fn().mockResolvedValue(undefined),
@@ -71,8 +73,7 @@ describe('Collaboration online Core authorization', () => {
       token as any,
       users as any,
       pages as any,
-      members as any,
-      permissions as any,
+      local as any,
       authorization as any,
     );
     const context = {
@@ -91,9 +92,11 @@ describe('Collaboration online Core authorization', () => {
     expect(
       authorization.requirePage.mock.calls.map((call: any[]) => call[2]),
     ).toEqual(['VIEW', 'VIEW', 'VIEW', 'EDIT', 'VIEW', 'VIEW']);
+    expect(local.localPermissions).toHaveBeenCalledTimes(6);
   });
 
   it('fails closed immediately after Core revokes VIEW', async () => {
+    const local = { localPermissions: jest.fn() };
     const authorization = {
       page: jest.fn(),
       requirePage: jest.fn().mockRejectedValue(new UnauthorizedException()),
@@ -102,8 +105,7 @@ describe('Collaboration online Core authorization', () => {
       token as any,
       users as any,
       pages as any,
-      members as any,
-      permissions as any,
+      local as any,
       authorization as any,
     );
     const connection = { readOnly: false, close: jest.fn() };

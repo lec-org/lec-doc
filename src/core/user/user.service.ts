@@ -1,6 +1,7 @@
 import { UserRepo } from '@docmost/db/repos/user/user.repo';
 import {
   BadRequestException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -42,6 +43,16 @@ export class UserService {
 
     if (!user) {
       throw new NotFoundException('User not found');
+    }
+
+    const managedByLec = await this.userRepo.hasLecIdentity(userId, workspace.id);
+    if (
+      managedByLec &&
+      (updateUserDto.name != null || updateUserDto.email != null)
+    ) {
+      throw new ForbiddenException(
+        '用户资料由 Lec Core 管理，请在 LecIM Desktop 中修改',
+      );
     }
 
     // preference update

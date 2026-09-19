@@ -99,6 +99,7 @@
     "happy-dom": "20.8.9",
     "image-dimensions": "2.5.0",
     "ioredis": "5.10.1",
+    "jose": "6.1.3",
     "jszip": "3.10.1",
     "kysely": "0.28.17",
     "kysely-migration-cli": "0.4.2",
@@ -186,7 +187,7 @@
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "(happy-dom|openid-client|oauth4webapi|jose).+\\.js$": [
+      "(nanoid|uuid|image-dimensions|marked|happy-dom|openid-client|oauth4webapi|jose).+\\.js$": [
         "babel-jest",
         {
           "presets": [

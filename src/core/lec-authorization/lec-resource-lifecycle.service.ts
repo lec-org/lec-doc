@@ -58,6 +58,36 @@ export class LecResourceLifecycleService {
     private readonly events: EventEmitter2,
   ) {}
 
+  async createSpaceBindIntent(
+    user: Pick<User, 'id' | 'workspaceId'>,
+    principal: OidcPrincipal,
+    spaceId: string,
+    personal: boolean,
+    trx: KyselyTransaction,
+  ) {
+    const organizationId = this.config.get<string>('LEC_DOC_ORGANIZATION_ID');
+    if (!z.uuid().safeParse(organizationId).success) throw this.unavailable();
+    const now = new Date();
+    await trx
+      .insertInto('lecResourceOperations')
+      .values({
+        id: randomUUID(),
+        workspaceId: user.workspaceId,
+        resourceKind: 'DOCMOST_SPACE',
+        resourceId: spaceId,
+        action: 'BIND_SPACE',
+        status: 'BIND_PENDING',
+        registrationKey: randomUUID(),
+        actorUserId: user.id,
+        actorIssuer: principal.issuer,
+        actorSubject: principal.subject,
+        payload: { organizationId, personal },
+        availableAt: now,
+        updatedAt: now,
+      })
+      .execute();
+  }
+
   /** 组织 ID 只来自部署控制面配置，永不接受浏览器输入。 */
   async ensureSpaceBound(
     user: Pick<User, 'id' | 'workspaceId'>,
@@ -74,28 +104,24 @@ export class LecResourceLifecycleService {
       .where('action', '=', 'BIND_SPACE')
       .executeTakeFirst();
     if (!operation) {
-      const organizationId = this.config.get<string>('LEC_DOC_ORGANIZATION_ID');
-      if (!z.uuid().safeParse(organizationId).success) throw this.unavailable();
-      const now = new Date();
-      await this.db
-        .insertInto('lecResourceOperations')
-        .values({
-          id: randomUUID(),
-          workspaceId,
-          resourceKind: 'DOCMOST_SPACE',
-          resourceId: spaceId,
-          action: 'BIND_SPACE',
-          status: 'BIND_PENDING',
-          registrationKey: randomUUID(),
-          actorUserId: user.id,
-          actorIssuer: principal.issuer,
-          actorSubject: principal.subject,
-          payload: { organizationId },
-          availableAt: now,
-          updatedAt: now,
-        })
-        .onConflict((oc) => oc.doNothing())
-        .execute();
+      const space = await this.db
+        .selectFrom('spaces')
+        .select(['creatorId', 'isPersonal'])
+        .where('id', '=', spaceId)
+        .where('workspaceId', '=', workspaceId)
+        .where('deletedAt', 'is', null)
+        .executeTakeFirst();
+      if (!space || (space.isPersonal && space.creatorId !== user.id))
+        throw new ForbiddenException();
+      await this.db.transaction().execute((trx) =>
+        this.createSpaceBindIntent(
+          user,
+          principal,
+          spaceId,
+          space.isPersonal,
+          trx,
+        ),
+      );
       operation = await this.db
         .selectFrom('lecResourceOperations')
         .selectAll()
@@ -616,7 +642,7 @@ export class LecResourceLifecycleService {
 
   private async processBind(operation: LifecycleOperation) {
     const payload = z
-      .strictObject({ organizationId: z.uuid() })
+      .strictObject({ organizationId: z.uuid(), personal: z.boolean() })
       .parse(operation.payload);
     const principal = this.principal(operation);
     const resource = this.matchResource(
@@ -629,6 +655,10 @@ export class LecResourceLifecycleService {
             principal,
             organization_id: payload.organizationId,
             space_id: operation.resourceId,
+            personal: payload.personal,
+            personal_owner_subject: payload.personal
+              ? operation.actorSubject
+              : undefined,
             registration_key: operation.registrationKey,
           },
           resourceEnvelopeSchema,

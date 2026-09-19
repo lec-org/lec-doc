@@ -84,8 +84,6 @@ describe('notification workers authorize before sensitive context', () => {
       const service = new CommentNotificationService(
         db as any,
         notification as any,
-        local as any,
-        local as any,
         { getPageWatcherIds: jest.fn() } as any,
       );
       const run = service.processComment(

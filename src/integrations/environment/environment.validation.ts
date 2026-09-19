@@ -139,6 +139,11 @@ export class EnvironmentVariables {
 
   @IsOptional()
   @IsString()
+  @Matches(/^urn:lec:[a-z0-9][a-z0-9-]{0,62}$/)
+  LEC_DOC_OIDC_AUDIENCE: string;
+
+  @IsOptional()
+  @IsString()
   AI_EMBEDDING_MODEL: string;
 
   @ValidateIf((obj) => obj.AI_EMBEDDING_DIMENSION)

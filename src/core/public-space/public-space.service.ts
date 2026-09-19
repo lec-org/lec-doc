@@ -60,7 +60,7 @@ export class PublicSpaceService {
     }
 
     const space = await this.spaceRepo.findBySlug(spaceSlug, workspace.id);
-    if (!space || space.deletedAt) {
+    if (!space || space.deletedAt || space.isPersonal) {
       throw new NotFoundException('Space not found');
     }
 

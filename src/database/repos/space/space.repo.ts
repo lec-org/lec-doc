@@ -81,7 +81,7 @@ export class SpaceRepo {
       .executeTakeFirst();
   }
 
-  async findPersonalSpace(
+  async findDefaultPersonalSpace(
     userId: string,
     workspaceId: string,
     trx?: KyselyTransaction,
@@ -92,7 +92,7 @@ export class SpaceRepo {
       .selectAll('spaces')
       .where('workspaceId', '=', workspaceId)
       .where('creatorId', '=', userId)
-      .where('isPersonal', '=', true)
+      .where('isDefaultPersonal', '=', true)
       .where('deletedAt', 'is', null)
       .executeTakeFirst();
   }

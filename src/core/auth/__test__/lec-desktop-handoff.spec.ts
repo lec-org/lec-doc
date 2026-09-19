@@ -28,6 +28,9 @@ describe('Desktop subject-bound handoff', () => {
       subject: 'desktop-user',
       email: 'desktop@example.test',
       name: 'Desktop User',
+      realName: 'Desktop User',
+      organizationId: '20000000-0000-4000-8000-000000000001',
+      tenantRole: 'member' as const,
     };
     const issued = await service.issue(
       workspaceId,
@@ -70,6 +73,9 @@ describe('Desktop subject-bound handoff', () => {
         subject: 'desktop-user',
         email: 'desktop@example.test',
         name: 'Desktop User',
+      realName: 'Desktop User',
+      organizationId: '20000000-0000-4000-8000-000000000001',
+      tenantRole: 'member' as const,
       },
       '8',
       'https://doc.example.test',

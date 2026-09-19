@@ -7,6 +7,7 @@ import { DbInterface } from '../database/types/db.interface';
 import { Workspaces } from '../database/types/db';
 import { z } from 'zod';
 import { KyselyDB } from '../database/types/kysely.types';
+import { LecBootstrapProfileClient } from './lec-bootstrap-profile.client';
 
 const inputSchema = z.strictObject({
   workspaceId: z.uuid(),
@@ -29,6 +30,7 @@ export class BootstrapWorkspaceService {
   constructor(
     @InjectKysely() private readonly db: KyselyDB,
     private readonly config: ConfigService,
+    private readonly profiles: LecBootstrapProfileClient,
   ) {}
 
   async bootstrap(raw: BootstrapWorkspaceInput) {
@@ -48,6 +50,13 @@ export class BootstrapWorkspaceService {
       throw new ConflictException(
         'bootstrap issuer does not match LEC_DOC_OIDC_ISSUER',
       );
+    // Core is the only authority for the default personal-space display name.
+    // Resolve it before opening the transaction so an unavailable Core writes nothing.
+    const ownerRealName = await this.profiles.getOwnerRealName({
+      issuer,
+      subject: input.ownerSubject,
+      organizationId: input.organizationId,
+    });
 
     return this.db.transaction().execute(async (trx) => {
       // Serializes two first-run CLI invocations even while no workspace row exists.
@@ -72,6 +81,7 @@ export class BootstrapWorkspaceService {
         return this.verifyExisting(trx, workspaces[0], {
           ...input,
           ownerIssuer: issuer,
+          ownerRealName,
         });
 
       const workspace = await trx
@@ -94,7 +104,7 @@ export class BootstrapWorkspaceService {
           role: 'owner',
           emailVerifiedAt: new Date(),
           lastLoginAt: new Date(),
-          locale: 'en-US',
+          locale: 'zh-CN',
         })
         .returning(['id'])
         .executeTakeFirstOrThrow();
@@ -150,6 +160,47 @@ export class BootstrapWorkspaceService {
           subject: input.ownerSubject,
         })
         .execute();
+      const personalSpace = await trx
+        .insertInto('spaces')
+        .values({
+          workspaceId: workspace.id,
+          creatorId: owner.id,
+          name: ownerRealName,
+          slug: `personal-${owner.id.replaceAll('-', '')}`,
+          visibility: 'private',
+          defaultRole: 'admin',
+          isPersonal: true,
+          isDefaultPersonal: true,
+        })
+        .returning('id')
+        .executeTakeFirstOrThrow();
+      await trx
+        .insertInto('spaceMembers')
+        .values({
+          spaceId: personalSpace.id,
+          userId: owner.id,
+          role: 'admin',
+          addedById: owner.id,
+        })
+        .execute();
+      await trx
+        .insertInto('lecResourceOperations')
+        .values({
+          id: randomUUID(),
+          workspaceId: workspace.id,
+          resourceKind: 'DOCMOST_SPACE',
+          resourceId: personalSpace.id,
+          action: 'BIND_SPACE',
+          status: 'BIND_PENDING',
+          registrationKey: randomUUID(),
+          actorUserId: owner.id,
+          actorIssuer: issuer,
+          actorSubject: input.ownerSubject,
+          payload: { organizationId: input.organizationId, personal: true },
+          availableAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .execute();
       await trx
         .insertInto('lecResourceOperations')
         .values({
@@ -163,7 +214,7 @@ export class BootstrapWorkspaceService {
           actorUserId: owner.id,
           actorIssuer: issuer,
           actorSubject: input.ownerSubject,
-          payload: { organizationId: input.organizationId },
+          payload: { organizationId: input.organizationId, personal: false },
           availableAt: new Date(),
           updatedAt: new Date(),
         })
@@ -174,6 +225,7 @@ export class BootstrapWorkspaceService {
         ownerUserId: owner.id,
         groupId: group.id,
         spaceId: space.id,
+        personalSpaceId: personalSpace.id,
         coreBinding: 'pending' as const,
       };
     });
@@ -182,7 +234,10 @@ export class BootstrapWorkspaceService {
   private async verifyExisting(
     trx: Transaction<DbInterface>,
     workspace: Selectable<Workspaces>,
-    input: z.output<typeof inputSchema> & { ownerIssuer: string },
+    input: z.output<typeof inputSchema> & {
+      ownerIssuer: string;
+      ownerRealName: string;
+    },
   ) {
     if (
       workspace.id !== input.workspaceId ||
@@ -198,26 +253,21 @@ export class BootstrapWorkspaceService {
       .selectFrom('users')
       .selectAll()
       .where('workspaceId', '=', workspace.id)
-      .where('role', '=', 'owner')
+      .where('email', '=', input.ownerEmail)
       .execute();
     if (
       owner.length !== 1 ||
       owner[0].email !== input.ownerEmail ||
-      owner[0].name !== input.ownerName ||
       owner[0].password !== null ||
       owner[0].deletedAt ||
       owner[0].deactivatedAt
     )
       throw new ConflictException('existing bootstrap does not match owner');
-    const users = await trx
-      .selectFrom('users')
-      .select('id')
-      .where('workspaceId', '=', workspace.id)
-      .execute();
-    const identities = await trx
+    const identity = await trx
       .selectFrom('lecIdentities')
       .selectAll()
       .where('workspaceId', '=', workspace.id)
+      .where('userId', '=', owner[0].id)
       .execute();
     const groups = await trx
       .selectFrom('groups')
@@ -233,6 +283,23 @@ export class BootstrapWorkspaceService {
       .where('workspaceId', '=', workspace.id)
       .where('deletedAt', 'is', null)
       .executeTakeFirst();
+    const personalSpace = await trx
+      .selectFrom('spaces')
+      .selectAll()
+      .where('workspaceId', '=', workspace.id)
+      .where('creatorId', '=', owner[0].id)
+      .where('isDefaultPersonal', '=', true)
+      .where('deletedAt', 'is', null)
+      .executeTakeFirst();
+    const personalMembership = personalSpace
+      ? await trx
+          .selectFrom('spaceMembers')
+          .select(['userId', 'role'])
+          .where('spaceId', '=', personalSpace.id)
+          .where('userId', '=', owner[0].id)
+          .where('deletedAt', 'is', null)
+          .executeTakeFirst()
+      : undefined;
     const operation = await trx
       .selectFrom('lecResourceOperations')
       .selectAll()
@@ -240,12 +307,19 @@ export class BootstrapWorkspaceService {
       .where('resourceId', '=', workspace.defaultSpaceId)
       .where('action', '=', 'BIND_SPACE')
       .executeTakeFirst();
+    const personalOperation = personalSpace
+      ? await trx
+          .selectFrom('lecResourceOperations')
+          .selectAll()
+          .where('workspaceId', '=', workspace.id)
+          .where('resourceId', '=', personalSpace.id)
+          .where('action', '=', 'BIND_SPACE')
+          .executeTakeFirst()
+      : undefined;
     if (
-      users.length !== 1 ||
-      identities.length !== 1 ||
-      identities[0].userId !== owner[0].id ||
-      identities[0].issuer !== input.ownerIssuer ||
-      identities[0].subject !== input.ownerSubject ||
+      identity.length !== 1 ||
+      identity[0].issuer !== input.ownerIssuer ||
+      identity[0].subject !== input.ownerSubject ||
       groups.length !== 1 ||
       groups[0].name !== 'Everyone' ||
       !space ||
@@ -256,8 +330,21 @@ export class BootstrapWorkspaceService {
       operation.status === 'FAILED' ||
       operation.actorIssuer !== input.ownerIssuer ||
       operation.actorSubject !== input.ownerSubject ||
-      (operation.payload as { organizationId?: string }).organizationId !==
-        input.organizationId
+      (operation.payload as { organizationId?: string; personal?: boolean })
+        .organizationId !== input.organizationId ||
+      (operation.payload as { personal?: boolean }).personal !== false ||
+      !personalSpace ||
+      personalSpace.name !== input.ownerRealName ||
+      !personalSpace.isPersonal ||
+      !personalSpace.isDefaultPersonal ||
+      personalMembership?.role !== 'admin' ||
+      personalOperation?.actorUserId !== owner[0].id ||
+      personalOperation.status === 'FAILED' ||
+      (personalOperation.payload as {
+        organizationId?: string;
+        personal?: boolean;
+      }).organizationId !== input.organizationId ||
+      (personalOperation.payload as { personal?: boolean }).personal !== true
     )
       throw new ConflictException('existing bootstrap does not match input');
     const memberships = await trx
@@ -287,6 +374,7 @@ export class BootstrapWorkspaceService {
       ownerUserId: owner[0].id,
       groupId: groups[0].id,
       spaceId: space.id,
+      personalSpaceId: personalSpace.id,
       coreBinding:
         operation.status === 'DONE' ? ('done' as const) : ('pending' as const),
     };

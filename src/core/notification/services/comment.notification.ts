@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectKysely } from 'nestjs-kysely';
 import { KyselyDB } from '@docmost/db/types/kysely.types';
 import {
@@ -7,8 +7,6 @@ import {
 } from '../../../integrations/queue/constants/queue.interface';
 import { NotificationService } from '../notification.service';
 import { NotificationType } from '../notification.constants';
-import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
-import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
 import { WatcherRepo } from '@docmost/db/repos/watcher/watcher.repo';
 import { CommentMentionEmail } from '@docmost/transactional/emails/comment-mention-email';
 import { CommentCreateEmail } from '@docmost/transactional/emails/comment-created-email';
@@ -17,13 +15,9 @@ import { getPageTitle } from '../../../common/helpers';
 
 @Injectable()
 export class CommentNotificationService {
-  private readonly logger = new Logger(CommentNotificationService.name);
-
   constructor(
     @InjectKysely() private readonly db: KyselyDB,
     private readonly notificationService: NotificationService,
-    private readonly spaceMemberRepo: SpaceMemberRepo,
-    private readonly pagePermissionRepo: PagePermissionRepo,
     private readonly watcherRepo: WatcherRepo,
   ) {}
 
@@ -59,18 +53,7 @@ export class CommentNotificationService {
       );
     if (coreAuthorized.size === 0) return;
 
-    const usersWithSpaceAccess =
-      await this.spaceMemberRepo.getUserIdsWithSpaceAccess(
-        [...coreAuthorized],
-        spaceId,
-      );
-
-    const usersWithPageAccess =
-      await this.pagePermissionRepo.getUserIdsWithPageAccess(pageId, [
-        ...usersWithSpaceAccess,
-      ]);
-    const usersWithAccess = new Set(usersWithPageAccess);
-    if (usersWithAccess.size === 0) return;
+    const usersWithAccess = coreAuthorized;
 
     const context = await this.getCommentContext(
       actorId,
@@ -152,24 +135,6 @@ export class CommentNotificationService {
         workspaceId,
       );
     if (!coreAuthorized.has(commentCreatorId)) return;
-
-    const roles = await this.spaceMemberRepo.getUserSpaceRoles(
-      commentCreatorId,
-      spaceId,
-    );
-
-    if (!roles) {
-      this.logger.debug(
-        `Skipping resolved notification for user ${commentCreatorId}: no access to space ${spaceId}`,
-      );
-      return;
-    }
-
-    const hasPageAccess =
-      await this.pagePermissionRepo.getUserIdsWithPageAccess(pageId, [
-        commentCreatorId,
-      ]);
-    if (hasPageAccess.length === 0) return;
 
     const context = await this.getCommentContext(
       actorId,

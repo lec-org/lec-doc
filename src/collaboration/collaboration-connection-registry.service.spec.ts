@@ -27,6 +27,9 @@ function setup() {
     } as any,
     { findById: jest.fn().mockResolvedValue({ id: 'user-1' }) } as any,
     {
+      localPermissions: jest.fn().mockResolvedValue({ canView: true, canEdit: true }),
+    } as any,
+    {
       getOrThrow: jest.fn().mockReturnValue({
         duplicate: jest.fn().mockReturnValue(subscriber),
       }),
@@ -130,7 +133,7 @@ describe('Idle collaboration revocation', () => {
     }
   });
 
-  it('ignores duplicate and out-of-order resource versions', async () => {
+  it('deduplicates event IDs, accepts same-version events, and ignores older versions', async () => {
     const { registry, onMessage } = setup();
     const { connection: newerConnection } = await connect(registry, page1);
     const revocation = (eventId: string, resourceVersion: number) =>
@@ -149,6 +152,10 @@ describe('Idle collaboration revocation', () => {
     onMessage(revocation('00000000-0000-4000-8000-000000000002', 2));
     onMessage(revocation('00000000-0000-4000-8000-000000000003', 3));
     expect(staleConnection.close).not.toHaveBeenCalled();
+
+    const { connection: sameVersionConnection } = await connect(registry, page1);
+    onMessage(revocation('00000000-0000-4000-8000-000000000004', 3));
+    expect(sameVersionConnection.close).toHaveBeenCalledTimes(1);
     registry.onModuleDestroy();
   });
 

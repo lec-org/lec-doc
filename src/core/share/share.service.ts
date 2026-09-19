@@ -546,12 +546,13 @@ export class ShareService {
       .select([
         'workspaces.settings as workspaceSettings',
         'spaces.settings as spaceSettings',
+        'spaces.isPersonal',
       ])
       .where('workspaces.id', '=', workspaceId)
       .where('spaces.id', '=', spaceId)
       .executeTakeFirst();
 
-    if (!result) return false;
+    if (!result || result.isPersonal) return false;
 
     const workspaceDisabled =
       (result.workspaceSettings as any)?.sharing?.disabled === true;

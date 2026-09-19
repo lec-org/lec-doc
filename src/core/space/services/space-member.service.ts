@@ -87,7 +87,6 @@ export class SpaceMemberService {
     if (!space) {
       throw new NotFoundException('Space not found');
     }
-
     return await this.spaceMemberRepo.getSpaceMembersPaginated(
       spaceId,
       pagination,
@@ -103,6 +102,9 @@ export class SpaceMemberService {
     const space = await this.spaceRepo.findById(dto.spaceId, workspaceId);
     if (!space) {
       throw new NotFoundException('Space not found');
+    }
+    if (space.isPersonal) {
+      throw new BadRequestException('Personal spaces cannot have members');
     }
 
     // make sure we have valid workspace users
@@ -248,6 +250,9 @@ export class SpaceMemberService {
       if (!space) {
         throw new NotFoundException('Space not found');
       }
+      if (space.isPersonal) {
+        throw new BadRequestException('Personal spaces cannot change members');
+      }
 
       const spaceMember = await this.spaceMemberRepo.getSpaceMemberByTypeId(
         dto.spaceId,
@@ -325,6 +330,9 @@ export class SpaceMemberService {
       );
       if (!space) {
         throw new NotFoundException('Space not found');
+      }
+      if (space.isPersonal) {
+        throw new BadRequestException('Personal spaces cannot change members');
       }
 
       const spaceMember = await this.spaceMemberRepo.getSpaceMemberByTypeId(

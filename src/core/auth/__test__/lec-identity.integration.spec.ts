@@ -31,7 +31,10 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     issuer: 'https://sso.example.test/oidc',
     subject: 'subject-1',
     email: 'user@example.test',
-    name: '测试用户',
+    name: '测试昵称',
+    realName: '测试用户',
+    organizationId: '10000000-0000-4000-8000-000000000001',
+    tenantRole: 'member' as const,
   };
 
   beforeAll(() => {
@@ -80,9 +83,56 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     expect(saved.workspaceId).toBe(workspaceId);
     expect(saved.role).toBe('member');
     expect(await memberships.getGroupUserById(first.id, groupId)).toBeDefined();
+    const personal = await db
+      .selectFrom('spaces')
+      .select(['id', 'name', 'isPersonal', 'isDefaultPersonal'])
+      .where('creatorId', '=', first.id)
+      .where('isDefaultPersonal', '=', true)
+      .executeTakeFirstOrThrow();
+    expect(personal).toMatchObject({
+      name: principal.realName,
+      isPersonal: true,
+      isDefaultPersonal: true,
+    });
+    expect(
+      await db
+        .selectFrom('spaceMembers')
+        .select('role')
+        .where('spaceId', '=', personal.id)
+        .where('userId', '=', first.id)
+        .executeTakeFirst(),
+    ).toEqual({ role: 'admin' });
+    expect(
+      await db
+        .selectFrom('lecResourceOperations')
+        .select(['resourceId', 'action', 'status'])
+        .where('resourceId', '=', personal.id)
+        .executeTakeFirst(),
+    ).toEqual({
+      resourceId: personal.id,
+      action: 'BIND_SPACE',
+      status: 'BIND_PENDING',
+    });
   });
 
-  it('八个并发首次登录只得到同一个账号', async () => {
+  it('只用 Core real_name 同步默认个人空间名称', async () => {
+    const user = await identities.resolve(workspaceId, principal);
+    await identities.resolve(workspaceId, {
+      ...principal,
+      name: '另一昵称',
+      realName: '新实名',
+    });
+    const spaces = await db
+      .selectFrom('spaces')
+      .select(['name', 'isDefaultPersonal'])
+      .where('creatorId', '=', user.id)
+      .where('isPersonal', '=', true)
+      .where('deletedAt', 'is', null)
+      .execute();
+    expect(spaces).toEqual([{ name: '新实名', isDefaultPersonal: true }]);
+  });
+
+  it('八个并发首次登录只得到同一个账号和一个默认个人空间', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
         identities.resolve(workspaceId, principal),
@@ -90,6 +140,14 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     );
     expect(new Set(results.map((user) => user.id)).size).toBe(1);
     expect(await memberships.getUserGroupIds(results[0].id)).toEqual([groupId]);
+    expect(
+      await db
+        .selectFrom('spaces')
+        .select(({ fn }) => fn.countAll<number>().as('count'))
+        .where('creatorId', '=', results[0].id)
+        .where('isDefaultPersonal', '=', true)
+        .executeTakeFirst(),
+    ).toEqual({ count: 1 });
   });
 
   it('同一稳定主体修改邮箱不会创建第二个账号；相同邮箱不能跨 subject 合并', async () => {

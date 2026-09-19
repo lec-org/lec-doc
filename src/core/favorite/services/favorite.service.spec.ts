@@ -211,6 +211,61 @@ describe('FavoriteService', () => {
     ).toBe(true);
   });
 
+  it('filters space favorite IDs through Core SPACE VIEW', async () => {
+    const favorites = {
+      findFavoriteIdCandidates: jest.fn().mockResolvedValue({
+        items: [
+          {
+            id: 'favorite-allowed',
+            entityId: 'allowed',
+            workspaceId: user.workspaceId,
+            $cursor: 'cursor-allowed',
+          },
+          {
+            id: 'favorite-denied',
+            entityId: 'denied',
+            workspaceId: user.workspaceId,
+            $cursor: 'cursor-denied',
+          },
+        ],
+        meta: { hasNextPage: false, nextCursor: null },
+      }),
+    };
+    const core = {
+      filterSpaces: jest.fn().mockResolvedValue([
+        { id: 'allowed', workspaceId: user.workspaceId },
+      ]),
+    };
+    const service = new FavoriteService(
+      favorites as any,
+      {} as any,
+      core as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.getFavoriteIds(user, user.workspaceId, FavoriteType.SPACE),
+    ).resolves.toEqual({
+      items: ['allowed'],
+      meta: {
+        limit: 250,
+        hasNextPage: false,
+        hasPrevPage: false,
+        nextCursor: null,
+        prevCursor: null,
+      },
+    });
+    expect(core.filterSpaces).toHaveBeenCalledWith(
+      [
+        { id: 'allowed', workspaceId: user.workspaceId },
+        { id: 'denied', workspaceId: user.workspaceId },
+      ],
+      user,
+    );
+  });
+
   it('caps favorite IDs at 250 authorized results and returns that result cursor', async () => {
     const candidates = Array.from({ length: 300 }, (_, index) => ({
       id: `favorite-${index}`,
@@ -237,7 +292,7 @@ describe('FavoriteService', () => {
     const service = new FavoriteService(
       favorites as any,
       {} as any,
-      {} as any,
+      { filterSpaces: jest.fn(async (spaces: any[]) => spaces) } as any,
       {} as any,
       {} as any,
       {} as any,
@@ -341,6 +396,64 @@ describe('FavoriteService', () => {
     expect(favorites.findUserFavoriteContentByIds).toHaveBeenCalledWith(
       ['favorite-100'],
       FavoriteType.PAGE,
+    );
+  });
+
+  it('filters hydrated space favorites through Core before loading metadata', async () => {
+    const favorites = {
+      findUserFavoriteCandidates: jest.fn().mockResolvedValue({
+        items: [
+          {
+            id: 'favorite-allowed',
+            type: FavoriteType.SPACE,
+            pageId: null,
+            spaceId: 'allowed',
+            workspaceId: user.workspaceId,
+            $cursor: 'cursor-allowed',
+          },
+          {
+            id: 'favorite-denied',
+            type: FavoriteType.SPACE,
+            pageId: null,
+            spaceId: 'denied',
+            workspaceId: user.workspaceId,
+            $cursor: 'cursor-denied',
+          },
+        ],
+        meta: { hasNextPage: false, nextCursor: null },
+      }),
+      findUserFavoriteContentByIds: jest.fn().mockResolvedValue([
+        { id: 'favorite-allowed', spaceId: 'allowed' },
+      ]),
+    };
+    const core = {
+      filterPages: jest.fn().mockResolvedValue([]),
+      filterSpaces: jest.fn().mockResolvedValue([
+        { id: 'allowed', workspaceId: user.workspaceId },
+      ]),
+    };
+    const service = new FavoriteService(
+      favorites as any,
+      { filterAccessiblePageIds: jest.fn().mockResolvedValue([]) } as any,
+      core as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.getUserFavorites(
+        user,
+        user.workspaceId,
+        { limit: 10 } as any,
+        FavoriteType.SPACE,
+      ),
+    ).resolves.toMatchObject({
+      items: [{ id: 'favorite-allowed', spaceId: 'allowed' }],
+    });
+    expect(favorites.findUserFavoriteContentByIds).toHaveBeenCalledWith(
+      ['favorite-allowed'],
+      FavoriteType.SPACE,
     );
   });
 

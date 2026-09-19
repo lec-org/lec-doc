@@ -104,6 +104,34 @@ export class LecAuthorizationService {
     return pages.filter((page) => allowed.has(page.id));
   }
 
+  async filterSpaces<
+    T extends { id: string; workspaceId: string },
+  >(
+    spaces: T[],
+    user: User | null,
+  ): Promise<T[]> {
+    if (!spaces.length) return [];
+    const workspaceId = spaces[0].workspaceId;
+    if (spaces.some((space) => space.workspaceId !== workspaceId)) this.deny();
+    const allowed = new Set<string>();
+    for (let index = 0; index < spaces.length; index += 100) {
+      const chunk = spaces.slice(index, index + 100);
+      const decisions = await this.check(
+        user,
+        workspaceId,
+        chunk.map((space) => ({
+          resource_kind: 'DOCMOST_SPACE',
+          resource_id: space.id,
+          capability: 'VIEW',
+        })),
+      );
+      decisions.forEach((decision) => {
+        if (decision.allowed) allowed.add(decision.resource_id);
+      });
+    }
+    return spaces.filter((space) => allowed.has(space.id));
+  }
+
   async requireTree(
     pages: Pick<Page, 'id' | 'workspaceId'>[],
     user: User,

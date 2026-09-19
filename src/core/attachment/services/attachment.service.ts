@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -129,6 +130,12 @@ export class AttachmentService {
     workspaceId: string,
     spaceId?: string,
   ) {
+    if (
+      type === AttachmentType.Avatar &&
+      (await this.userRepo.hasLecIdentity(userId, workspaceId))
+    ) {
+      throw new ForbiddenException('用户头像由 Lec Core 管理，请在 LecIM Desktop 中修改');
+    }
     const preparedFile: PreparedFile = await prepareFile(filePromise);
     validateFileType(preparedFile.fileExtension, validImageExtensions);
 
@@ -405,6 +412,9 @@ export class AttachmentService {
   }
 
   async removeUserAvatar(user: User) {
+    if (await this.userRepo.hasLecIdentity(user.id, user.workspaceId)) {
+      throw new ForbiddenException('用户头像由 Lec Core 管理，请在 LecIM Desktop 中修改');
+    }
     if (user.avatarUrl && !user.avatarUrl.toLowerCase().startsWith('http')) {
       const filePath = `${getAttachmentFolderPath(AttachmentType.Avatar, user.workspaceId)}/${user.avatarUrl}`;
       await this.deleteRedundantFile(filePath);

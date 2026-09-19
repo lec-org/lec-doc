@@ -29,12 +29,13 @@ import {
 import { UpdateSpaceDto } from './dto/update-space.dto';
 import { findHighestUserSpaceRole } from '@docmost/db/repos/space/utils';
 import { SpaceMemberRepo } from '@docmost/db/repos/space/space-member.repo';
+import { CreateSpaceDto } from './dto/create-space.dto';
 import {
   WorkspaceCaslAction,
   WorkspaceCaslSubject,
 } from '../casl/interfaces/workspace-ability.type';
 import WorkspaceAbilityFactory from '../casl/abilities/workspace-ability.factory';
-import { CreateSpaceDto } from './dto/create-space.dto';
+import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
 
 @UseGuards(JwtAuthGuard)
 @Controller('spaces')
@@ -45,6 +46,7 @@ export class SpaceController {
     private readonly spaceMemberRepo: SpaceMemberRepo,
     private readonly spaceAbility: SpaceAbilityFactory,
     private readonly workspaceAbility: WorkspaceAbilityFactory,
+    private readonly lecAuthorization: LecAuthorizationService,
   ) {}
 
   @HttpCode(HttpStatus.OK)
@@ -59,6 +61,8 @@ export class SpaceController {
       user.id,
       pagination,
     );
+
+    result.items = await this.lecAuthorization.filterSpaces(result.items, user);
 
     if (result.items.length > 0) {
       const spaceIds = result.items.map((s) => s.id);
@@ -105,10 +109,16 @@ export class SpaceController {
       workspace.id,
     );
 
-    if (!space) {
+    if (!space || (space.isPersonal && space.creatorId !== user.id)) {
       throw new NotFoundException('Space not found');
     }
 
+    await this.lecAuthorization.requireSpace(
+      space.id,
+      space.workspaceId,
+      user,
+      'VIEW',
+    );
     const ability = await this.spaceAbility.createForUser(user, space.id);
     if (ability.cannot(SpaceCaslAction.Read, SpaceCaslSubject.Settings)) {
       throw new ForbiddenException();
@@ -138,13 +148,21 @@ export class SpaceController {
     @AuthUser() user: User,
     @AuthWorkspace() workspace: Workspace,
   ) {
-    const ability = this.workspaceAbility.createForUser(user, workspace);
-    if (
-      ability.cannot(WorkspaceCaslAction.Manage, WorkspaceCaslSubject.Space)
-    ) {
-      throw new ForbiddenException();
+    const kind = createSpaceDto.kind ?? 'personal';
+    if (kind === 'team') {
+      const ability = this.workspaceAbility.createForUser(user, workspace);
+      if (
+        ability.cannot(WorkspaceCaslAction.Manage, WorkspaceCaslSubject.Space)
+      )
+        throw new ForbiddenException();
     }
-    return this.spaceService.createSpace(user, workspace.id, createSpaceDto);
+    return this.spaceService.createSpace(
+      user,
+      workspace.id,
+      createSpaceDto,
+      undefined,
+      { isPersonal: kind === 'personal' },
+    );
   }
 
   @HttpCode(HttpStatus.OK)

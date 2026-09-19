@@ -5,6 +5,7 @@ import { EnvironmentModule } from '../integrations/environment/environment.modul
 import { OutboundModule } from '../integrations/outbound/outbound.module';
 import { LecAuthorizationModule } from '../core/lec-authorization/lec-authorization.module';
 import { BootstrapWorkspaceService } from './bootstrap-workspace.service';
+import { LecBootstrapProfileClient } from './lec-bootstrap-profile.client';
 
 @Module({
   imports: [
@@ -14,7 +15,7 @@ import { BootstrapWorkspaceService } from './bootstrap-workspace.service';
     OutboundModule,
     LecAuthorizationModule,
   ],
-  providers: [BootstrapWorkspaceService],
+  providers: [BootstrapWorkspaceService, LecBootstrapProfileClient],
   exports: [BootstrapWorkspaceService],
 })
 export class BootstrapModule {}

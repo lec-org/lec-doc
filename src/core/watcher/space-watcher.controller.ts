@@ -36,7 +36,7 @@ export class SpaceWatcherController {
     workspace: Workspace,
   ) {
     const space = await this.spaceRepo.findById(spaceId, workspace.id);
-    if (!space) {
+    if (!space || (space.isPersonal && space.creatorId !== user.id)) {
       throw new NotFoundException('Space not found');
     }
 

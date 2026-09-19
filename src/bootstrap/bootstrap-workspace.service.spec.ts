@@ -5,6 +5,7 @@ import { PostgresJSDialect } from 'kysely-postgres-js';
 import postgres = require('postgres');
 import { KyselyDB } from '../database/types/kysely.types';
 import { BootstrapWorkspaceService } from './bootstrap-workspace.service';
+import { LecBootstrapProfileClient } from './lec-bootstrap-profile.client';
 
 const url = process.env.LEC_DOC_TEST_DATABASE_URL;
 (url ? describe : describe.skip)('OIDC-only workspace bootstrap', () => {
@@ -54,6 +55,10 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
 
   afterAll(async () => db.destroy());
 
+  const ownerRealName = 'Core 实名';
+  const profiles = {
+    getOwnerRealName: jest.fn().mockResolvedValue(ownerRealName),
+  } as unknown as LecBootstrapProfileClient;
   const service = () =>
     new BootstrapWorkspaceService(
       db,
@@ -61,6 +66,7 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
         LEC_DOC_ORGANIZATION_ID: organizationId,
         LEC_DOC_OIDC_ISSUER: input.ownerIssuer,
       }),
+      profiles,
     );
 
   it('transactionally creates one passwordless owner, default group/space and durable Core bind intent', async () => {
@@ -111,6 +117,17 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     ).toEqual([{ userId: user.id, groupId: null, role: 'admin' }]);
     expect(
       await db
+        .selectFrom('spaces')
+        .select(['name', 'isPersonal', 'isDefaultPersonal'])
+        .where('id', '=', result.personalSpaceId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({
+      name: ownerRealName,
+      isPersonal: true,
+      isDefaultPersonal: true,
+    });
+    expect(
+      await db
         .selectFrom('lecResourceOperations')
         .select(['action', 'status', 'payload', 'actorUserId'])
         .where('resourceId', '=', result.spaceId)
@@ -148,6 +165,25 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     expect(await db.selectFrom('users').select('id').execute()).toHaveLength(1);
   });
 
+  it('does not write when Core authoritative profile is unavailable', async () => {
+    const unavailable = {
+      getOwnerRealName: jest.fn().mockRejectedValue(new Error('unavailable')),
+    } as unknown as LecBootstrapProfileClient;
+    await expect(
+      new BootstrapWorkspaceService(
+        db,
+        new ConfigService({
+          LEC_DOC_ORGANIZATION_ID: organizationId,
+          LEC_DOC_OIDC_ISSUER: input.ownerIssuer,
+        }),
+        unavailable,
+      ).bootstrap(input),
+    ).rejects.toThrow('unavailable');
+    expect(await db.selectFrom('workspaces').select('id').execute()).toEqual(
+      [],
+    );
+  });
+
   it('rejects mismatched deployment identity before mutation', async () => {
     await expect(
       new BootstrapWorkspaceService(
@@ -156,6 +192,7 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
           LEC_DOC_ORGANIZATION_ID: organizationId,
           LEC_DOC_OIDC_ISSUER: 'https://other.example.test/oidc',
         }),
+        profiles,
       ).bootstrap(input),
     ).rejects.toThrow('issuer does not match');
     expect(await db.selectFrom('workspaces').select('id').execute()).toEqual(

@@ -185,7 +185,39 @@ export class PageController {
 
     const { canEdit, hasRestriction } =
       await this.pageAccessService.validateCanViewWithPermissions(page, user);
-
+    let containerVisible = false;
+    try {
+      await this.lecAuthorization.requireSpace(
+        page.spaceId,
+        page.workspaceId,
+        user,
+        'VIEW',
+      );
+      await this.spaceAbility.createForUser(user, page.spaceId);
+      containerVisible = true;
+    } catch {
+      // A direct page grant intentionally does not disclose its container space.
+    }
+    const visiblePage = containerVisible
+      ? page
+      : {
+          id: page.id,
+          slugId: page.slugId,
+          title: page.title,
+          icon: page.icon,
+          coverPhoto: page.coverPhoto,
+          isLocked: page.isLocked,
+          isBase: page.isBase,
+          createdAt: page.createdAt,
+          updatedAt: page.updatedAt,
+          deletedAt: page.deletedAt,
+          content: page.content,
+          creator: Reflect.get(page, 'creator'),
+          lastUpdatedBy: Reflect.get(page, 'lastUpdatedBy'),
+          contributors: Reflect.get(page, 'contributors'),
+          deletedBy: Reflect.get(page, 'deletedBy'),
+          space: null,
+        };
     const permissions = { canEdit, hasRestriction };
 
     if (dto.format && dto.format !== 'json' && page.content) {
@@ -194,13 +226,13 @@ export class PageController {
           ? jsonToMarkdown(page.content)
           : jsonToHtml(page.content);
       return {
-        ...page,
+        ...visiblePage,
         content: contentOutput,
         permissions,
       };
     }
 
-    return { ...page, permissions };
+    return { ...visiblePage, permissions };
   }
 
   @HttpCode(HttpStatus.OK)
@@ -687,6 +719,27 @@ export class PageController {
       }
 
       await this.pageAccessService.validateCanView(page, user);
+      try {
+        await this.lecAuthorization.requireSpace(
+          page.spaceId,
+          page.workspaceId,
+          user,
+          'VIEW',
+        );
+        await this.spaceAbility.createForUser(user, page.spaceId);
+      } catch {
+        // Page-only recipients may inspect the authorized document, never its tree.
+        return {
+          items: [],
+          meta: {
+            limit: pagination.limit,
+            hasNextPage: false,
+            hasPrevPage: false,
+            nextCursor: null,
+            prevCursor: null,
+          },
+        };
+      }
       spaceId = page.spaceId;
     }
 
@@ -860,6 +913,18 @@ export class PageController {
     }
 
     await this.pageAccessService.validateCanView(page, user);
+    try {
+      await this.lecAuthorization.requireSpace(
+        page.spaceId,
+        page.workspaceId,
+        user,
+        'VIEW',
+      );
+      await this.spaceAbility.createForUser(user, page.spaceId);
+    } catch {
+      // Page-only recipients may open the page, never infer its container or ancestors.
+      return [];
+    }
     const ancestors = await this.pageService.getPageBreadCrumbs(page.id);
     return this.lecAuthorization.filterPages(ancestors, user);
   }

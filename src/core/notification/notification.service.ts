@@ -18,7 +18,7 @@ import {
   NotificationType,
   NotificationTypeToSettingKey,
 } from './notification.constants';
-import { PagePermissionRepo } from '@docmost/db/repos/page/page-permission.repo';
+import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { LecAuthorizationService } from '../lec-authorization/lec-authorization.service';
 import { CursorPaginationResult } from '@docmost/db/pagination/cursor-pagination';
 import { Notification, User } from '@docmost/db/types/entity.types';
@@ -32,7 +32,7 @@ export class NotificationService {
 
   constructor(
     private readonly notificationRepo: NotificationRepo,
-    private readonly pagePermissionRepo: PagePermissionRepo,
+    private readonly pageRepo: PageRepo,
     @Optional()
     @Inject(WsGateway)
     private readonly wsGateway: WsGateway | undefined,
@@ -91,18 +91,20 @@ export class NotificationService {
     const active = users.filter(
       (user) => !user.deletedAt && !user.deactivatedAt,
     );
+    const page = await this.pageRepo.findById(pageId);
+    if (!page || page.workspaceId !== workspaceId) return new Set();
     const allowed = await Promise.all(
-      active.map((user) =>
-        this.lecAuthorization.filterPages(
-          [{ id: pageId, workspaceId }],
-          user as User,
-        ),
-      ),
+      active.map(async (user) => {
+        try {
+          await this.pageAccess.validateCanView(page, user as User);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
     );
     return new Set(
-      active
-        .filter((_, index) => allowed[index].length > 0)
-        .map((user) => user.id),
+      active.filter((_, index) => allowed[index]).map((user) => user.id),
     );
   }
 
@@ -209,12 +211,19 @@ export class NotificationService {
       user,
     );
     const coreAllowedIds = new Set(coreAllowed.map((page) => page.id));
-    const locallyAllowed =
-      await this.pagePermissionRepo.filterAccessiblePageIds({
-        pageIds: [...coreAllowedIds],
-        userId: user.id,
-      });
-    const locallyAllowedIds = new Set(locallyAllowed);
+    const locallyAllowed = await Promise.all(
+      [...coreAllowedIds].map(async (pageId) => {
+        const page = await this.pageRepo.findById(pageId);
+        if (!page) return null;
+        try {
+          await this.pageAccess.localPermissions(page, user);
+          return pageId;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const locallyAllowedIds = new Set(locallyAllowed.filter(Boolean));
     return candidates.filter(
       (candidate) =>
         !candidate.pageId ||

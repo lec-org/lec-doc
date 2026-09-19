@@ -10,6 +10,7 @@ import { LecCollabContext } from './extensions/authentication.extension';
 import { LecAuthorizationService } from '../core/lec-authorization/lec-authorization.service';
 import { PageRepo } from '@docmost/db/repos/page/page.repo';
 import { UserRepo } from '@docmost/db/repos/user/user.repo';
+import { PageAccessService } from '../core/page/page-access/page-access.service';
 import { RedisService } from '@nestjs-labs/nestjs-ioredis';
 import { z } from 'zod';
 
@@ -42,6 +43,7 @@ export class CollaborationConnectionRegistry
   private readonly logger = new Logger(CollaborationConnectionRegistry.name);
   private readonly active = new Map<string, Active>();
   private readonly resourceVersions = new Map<string, number>();
+  private readonly eventIds = new Set<string>();
   private checking = false;
   private readonly timer = setInterval(() => void this.sweep(), 12_000);
   private readonly subscriber;
@@ -50,6 +52,7 @@ export class CollaborationConnectionRegistry
     private readonly authorization: LecAuthorizationService,
     private readonly pages: PageRepo,
     private readonly users: UserRepo,
+    private readonly pageAccess: PageAccessService,
     redis: RedisService,
   ) {
     this.timer.unref();
@@ -113,8 +116,11 @@ export class CollaborationConnectionRegistry
             : null;
           if (!page || !user) throw new Error('principal unavailable');
           await this.authorization.requirePage(page, user, 'VIEW');
-          if (!entry.connection.readOnly)
+          const local = await this.pageAccess.localPermissions(page, user);
+          if (!entry.connection.readOnly) {
             await this.authorization.requirePage(page, user, 'EDIT');
+            if (!local.canEdit) throw new Error('local write access revoked');
+          }
         } catch {
           this.close(entry);
         }
@@ -137,10 +143,15 @@ export class CollaborationConnectionRegistry
       return;
     }
     const event = parsed.data;
+    if (this.eventIds.has(event.event_id)) return;
+    this.eventIds.add(event.event_id);
     const resourceKey = `${event.workspace_id}\0${event.resource_kind}\0${event.resource_id}`;
     const latestVersion = this.resourceVersions.get(resourceKey) ?? 0;
-    if (event.resource_version <= latestVersion) return;
-    this.resourceVersions.set(resourceKey, event.resource_version);
+    if (event.resource_version < latestVersion) return;
+    this.resourceVersions.set(
+      resourceKey,
+      Math.max(latestVersion, event.resource_version),
+    );
     if (event.resource_kind === 'DOCMOST_PAGE')
       this.disconnectPage(event.resource_id, event.workspace_id);
     else this.disconnectSpace(event.resource_id, event.workspace_id);

@@ -22,6 +22,8 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { CursorPaginationResult } from '@docmost/db/pagination/cursor-pagination';
 import { ShareRepo } from '@docmost/db/repos/share/share.repo';
 import { WorkspaceRepo } from '@docmost/db/repos/workspace/workspace.repo';
+import { LecAuthorizationService } from '../../lec-authorization/lec-authorization.service';
+import { LecResourceLifecycleService } from '../../lec-authorization/lec-resource-lifecycle.service';
 import { LicenseCheckService } from '../../../integrations/environment/license-check.service';
 import { AuditEvent, AuditResource } from '../../../common/events/audit-events';
 import { diffAuditTrackedFields } from '../../../common/helpers';
@@ -38,6 +40,8 @@ export class SpaceService {
     private shareRepo: ShareRepo,
     private workspaceRepo: WorkspaceRepo,
     private licenseCheckService: LicenseCheckService,
+    private readonly authorization: LecAuthorizationService,
+    private readonly lifecycle: LecResourceLifecycleService,
     @InjectKysely() private readonly db: KyselyDB,
     @InjectQueue(QueueName.ATTACHMENT_QUEUE) private attachmentQueue: Queue,
     @Inject(AUDIT_SERVICE) private readonly auditService: IAuditService,
@@ -48,7 +52,7 @@ export class SpaceService {
     workspaceId: string,
     createSpaceDto: CreateSpaceDto,
     trx?: KyselyTransaction,
-    options?: { isPersonal?: boolean },
+    options?: { isPersonal?: boolean; isDefaultPersonal?: boolean },
   ): Promise<Space> {
     let space = null;
 
@@ -70,6 +74,20 @@ export class SpaceService {
           workspaceId,
           trx,
         );
+        if (options?.isPersonal) {
+          const principal = await this.authorization.principal(
+            authUser,
+            workspaceId,
+          );
+          if (principal.type !== 'OIDC') this.authorization.deny();
+          await this.lifecycle.createSpaceBindIntent(
+            authUser,
+            principal,
+            space.id,
+            true,
+            trx,
+          );
+        }
       },
       trx,
     );
@@ -96,7 +114,7 @@ export class SpaceService {
     workspaceId: string,
     createSpaceDto: CreateSpaceDto,
     trx?: KyselyTransaction,
-    options?: { isPersonal?: boolean },
+    options?: { isPersonal?: boolean; isDefaultPersonal?: boolean },
   ): Promise<Space> {
     const slugExists = await this.spaceRepo.slugExists(
       createSpaceDto.slug,
@@ -117,6 +135,7 @@ export class SpaceService {
         workspaceId: workspaceId,
         slug: createSpaceDto.slug,
         isPersonal: options?.isPersonal ?? false,
+        isDefaultPersonal: options?.isDefaultPersonal ?? false,
       },
       trx,
     );
@@ -174,7 +193,16 @@ export class SpaceService {
       updateSpaceDto.spaceId,
       workspaceId,
     );
-    const settingsBefore = (spaceBefore?.settings ?? {}) as Record<string, any>;
+    if (!spaceBefore) throw new NotFoundException('Space not found');
+    if (
+      spaceBefore.isDefaultPersonal &&
+      updateSpaceDto.name !== undefined &&
+      updateSpaceDto.name !== spaceBefore.name
+    )
+      throw new ForbiddenException(
+        'Default personal space name follows the account real name',
+      );
+    const settingsBefore = (spaceBefore.settings ?? {}) as Record<string, any>;
 
     const before: Record<string, any> = {};
     const after: Record<string, any> = {};
@@ -276,6 +304,9 @@ export class SpaceService {
     const space = await this.spaceRepo.findById(spaceId, workspaceId);
     if (!space) {
       throw new NotFoundException('Space not found');
+    }
+    if (space.isDefaultPersonal) {
+      throw new ForbiddenException('Default personal space cannot be deleted');
     }
 
     await this.spaceRepo.deleteSpace(spaceId, workspaceId);

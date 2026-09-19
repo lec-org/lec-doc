@@ -28,6 +28,29 @@ export class PagePermissionRepo {
     private readonly groupRepo: GroupRepo,
   ) {}
 
+  async findActiveLecGrant(pageId: string, userId: string) {
+    const direct = await this.db
+      .selectFrom('lecPageGrantProjections')
+      .select('grantId')
+      .where('pageId', '=', pageId)
+      .where('userId', '=', userId)
+      .where('revokedAt', 'is', null)
+      .where((eb) =>
+        eb.or([eb('expiresAt', 'is', null), eb('expiresAt', '>', new Date())]),
+      )
+      .executeTakeFirst();
+    if (direct) return direct;
+    const approved = await this.db
+      .selectFrom('lecPageAccessProjections')
+      .select('accessRequestId')
+      .where('pageId', '=', pageId)
+      .where('userId', '=', userId)
+      .where('revokedAt', 'is', null)
+      .where('expiresAt', '>', new Date())
+      .executeTakeFirst();
+    return approved ? { grantId: approved.accessRequestId } : undefined;
+  }
+
   async findPageAccessByPageId(
     pageId: string,
     trx?: KyselyTransaction,

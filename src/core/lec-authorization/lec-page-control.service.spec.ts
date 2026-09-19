@@ -142,6 +142,16 @@ describe('Lec page control wrappers', () => {
       updated_at: '2026-09-17T00:00:00.000Z',
     },
   };
+  const reviewResource = {
+    data: {
+      ...coreResource.data,
+      access_request_id: accessRequest.data.id,
+      decision: 'APPROVE',
+      user_issuer: principal.issuer,
+      user_subject: 'recipient-subject',
+      expires_at: '2030-01-01T00:00:00.000Z',
+    },
+  };
   const commands = [
     [
       'classify',
@@ -185,7 +195,7 @@ describe('Lec page control wrappers', () => {
         decision: 'APPROVE',
         expires_at: '2030-01-01T00:00:00.000Z',
       },
-      coreResource,
+      reviewResource,
     ],
     [
       'revokeAccess',
@@ -206,13 +216,32 @@ describe('Lec page control wrappers', () => {
         throw new Error('denied');
       }),
     };
+    const query: any = {
+      select: jest.fn(() => query),
+      set: jest.fn(() => query),
+      where: jest.fn(() => query),
+      values: jest.fn(() => query),
+      onConflict: jest.fn((callback) => {
+        callback({
+          column: jest.fn(() => ({ doUpdateSet: jest.fn(() => query) })),
+        });
+        return query;
+      }),
+      executeTakeFirst: jest.fn().mockResolvedValue({ userId: recipient.id }),
+      execute: jest.fn().mockResolvedValue([]),
+    };
+    const db = {
+      selectFrom: jest.fn(() => query),
+      insertInto: jest.fn(() => query),
+      updateTable: jest.fn(() => query),
+    };
     return {
       control: new LecPageControlService(
         pages as any,
         authorization as any,
         { send } as any,
         {} as any,
-        {} as any,
+        db as any,
       ),
       pages,
       authorization,

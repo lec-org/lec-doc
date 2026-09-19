@@ -11,6 +11,7 @@ import { LecIdentityModule } from './lec-identity.module';
 import { LecOidcController } from './lec-oidc.controller';
 import { LecDesktopHandoffController } from './lec-desktop-handoff.controller';
 import { LecDesktopHandoffService } from './lec-desktop-handoff.service';
+import { LecCoreProfileClient } from './lec-core-profile.client';
 
 @Module({
   imports: [TokenModule, WorkspaceModule, LecIdentityModule],
@@ -26,6 +27,7 @@ import { LecDesktopHandoffService } from './lec-desktop-handoff.service';
     LecOidcClient,
     LecOidcTransactions,
     LecDesktopHandoffService,
+    LecCoreProfileClient,
   ],
   exports: [SignupService],
 })

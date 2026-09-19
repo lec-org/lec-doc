@@ -26,17 +26,24 @@ describe('NotificationService authorization', () => {
         .mockResolvedValue([{ id: 'allowed', workspaceId: 'workspace' }]),
     };
     const local = {
-      filterAccessiblePageIds: jest.fn().mockResolvedValue(['allowed']),
+      localPermissions: jest.fn().mockResolvedValue({ canEdit: false }),
+    };
+    const pages = {
+      findById: jest.fn(async (id: string) => ({
+        id,
+        workspaceId: 'workspace',
+        spaceId: 'space',
+      })),
     };
     const service = new NotificationService(
       repo as any,
-      local as any,
+      pages as any,
       {} as any,
       {} as any,
       {} as any,
       core as any,
       {} as any,
-      {} as any,
+      local as any,
     );
 
     const result = await service.findByUserId(user, { limit: 2 } as any);
@@ -88,17 +95,24 @@ describe('NotificationService authorization', () => {
         ),
     };
     const local = {
-      filterAccessiblePageIds: jest.fn().mockResolvedValue(['allowed']),
+      localPermissions: jest.fn().mockResolvedValue({ canEdit: false }),
+    };
+    const pages = {
+      findById: jest.fn(async (id: string) => ({
+        id,
+        workspaceId: 'workspace',
+        spaceId: 'space',
+      })),
     };
     const service = new NotificationService(
       repo as any,
-      local as any,
+      pages as any,
       {} as any,
       {} as any,
       {} as any,
       core as any,
       {} as any,
-      {} as any,
+      local as any,
     );
 
     await expect(service.getUnreadCount(user)).resolves.toBe(2);
@@ -125,19 +139,24 @@ describe('NotificationService authorization', () => {
           .mockResolvedValue([{ id: 'allowed', workspaceId: 'workspace' }]),
       };
       const local = {
-        filterAccessiblePageIds: jest
-          .fn()
-          .mockResolvedValue(['allowed', 'denied']),
+        localPermissions: jest.fn().mockResolvedValue({ canEdit: false }),
+      };
+      const pages = {
+        findById: jest.fn(async (id: string) => ({
+          id,
+          workspaceId: 'workspace',
+          spaceId: 'space',
+        })),
       };
       const service = new NotificationService(
         repo as any,
-        local as any,
+        pages as any,
         {} as any,
         {} as any,
         {} as any,
         core as any,
         {} as any,
-        {} as any,
+        local as any,
       );
 
       if (notificationIds) {
@@ -180,16 +199,16 @@ describe('NotificationService authorization', () => {
       };
       const coreError = new Error('Core unavailable');
       const core = { filterPages: jest.fn().mockRejectedValue(coreError) };
-      const local = { filterAccessiblePageIds: jest.fn() };
+      const local = { localPermissions: jest.fn() };
       const service = new NotificationService(
         repo as any,
-        local as any,
+        {} as any,
         {} as any,
         {} as any,
         {} as any,
         core as any,
         {} as any,
-        {} as any,
+        local as any,
       );
 
       const action = notificationIds
@@ -197,7 +216,7 @@ describe('NotificationService authorization', () => {
         : service.markAllAsRead(user as any);
 
       await expect(action).rejects.toBe(coreError);
-      expect(local.filterAccessiblePageIds).not.toHaveBeenCalled();
+      expect(local.localPermissions).not.toHaveBeenCalled();
       expect(repo.markMultipleAsRead).not.toHaveBeenCalled();
     },
   );

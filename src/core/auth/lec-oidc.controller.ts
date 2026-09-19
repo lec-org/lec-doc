@@ -2,6 +2,7 @@ import {
   ConflictException,
   Controller,
   Get,
+  Logger,
   Req,
   Res,
   UnauthorizedException,
@@ -22,6 +23,7 @@ import {
   OIDC_TRANSACTION_SECONDS,
 } from './lec-oidc-transactions';
 import { LecIdentityService } from './lec-identity.service';
+import { LecCoreProfileClient } from './lec-core-profile.client';
 import { SessionService } from '../session/session.service';
 import { EnvironmentService } from '../../integrations/environment/environment.service';
 import { LecBrowserSecurity } from './lec-browser-security';
@@ -30,10 +32,13 @@ import { LecBrowserSecurity } from './lec-browser-security';
 @UseGuards(ThrottlerGuard)
 @Controller('auth/oidc')
 export class LecOidcController {
+  private readonly logger = new Logger(LecOidcController.name);
+
   constructor(
     private readonly oidc: LecOidcClient,
     private readonly transactions: LecOidcTransactions,
     private readonly identities: LecIdentityService,
+    private readonly coreProfile: LecCoreProfileClient,
     private readonly sessions: SessionService,
     private readonly environment: EnvironmentService,
     private readonly security: LecBrowserSecurity,
@@ -51,7 +56,7 @@ export class LecOidcController {
       httpOnly: true,
       secure: true,
       sameSite: 'lax',
-      path: '/api/auth/oidc/callback',
+      path: '/',
       maxAge: OIDC_TRANSACTION_SECONDS,
     });
     return res.redirect(url, 302);
@@ -76,7 +81,7 @@ export class LecOidcController {
     }
     const name = `lecOidc_${state}`;
     res.clearCookie(name, {
-      path: '/api/auth/oidc/callback',
+      path: '/',
       httpOnly: true,
       secure: true,
       sameSite: 'lax',
@@ -87,7 +92,11 @@ export class LecOidcController {
         req.cookies[name],
         state,
       );
-      const principal = await this.oidc.complete(url, transaction);
+      const completed = await this.oidc.completeWithAccessToken(url, transaction);
+      const principal = await this.coreProfile.principalFromAccessToken(
+        completed.accessToken,
+        completed.principal,
+      );
       const user = await this.identities.resolve(workspace.id, principal);
       const token = await this.sessions.rotateSessionAndToken(
         user,
@@ -107,8 +116,13 @@ export class LecOidcController {
       return res.redirect('/', 302);
     } catch (error) {
       if (error instanceof ConflictException) throw error;
-      // 不把上游响应、code、token 或底层异常写入客户端响应/日志。
-      throw new UnauthorizedException('登录失败或请求已失效，请重新登录');
+      this.logger.warn(
+        `OIDC callback failed: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+      // 不把上游响应、code、token 或底层异常写入客户端响应。
+      throw new UnauthorizedException('登录失败或请求已失效，请重新登录', {
+        cause: error,
+      });
     }
   }
 }

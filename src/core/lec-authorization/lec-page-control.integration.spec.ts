@@ -148,11 +148,18 @@ const url = process.env.LEC_DOC_TEST_DATABASE_URL;
     expect(
       await db
         .selectFrom('spaceMembers')
-        .select(['spaceId', 'userId', 'role'])
+        .select('id')
         .where('spaceId', '=', spaceId)
         .where('userId', '=', recipientId)
+        .executeTakeFirst(),
+    ).toBeUndefined();
+    expect(
+      await db
+        .selectFrom('lecPageGrantProjections')
+        .select(['grantId', 'pageId', 'userId'])
+        .where('grantId', '=', operationId)
         .executeTakeFirstOrThrow(),
-    ).toEqual({ spaceId, userId: recipientId, role: 'reader' });
+    ).toEqual({ grantId: operationId, pageId, userId: recipientId });
     const operation = await db
       .selectFrom('lecPageControlOperations')
       .select('status')

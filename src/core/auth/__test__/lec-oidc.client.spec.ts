@@ -82,6 +82,7 @@ describe('LecSSO OIDC 浏览器协议', () => {
     );
     expect(url.searchParams.get('response_type')).toBe('code');
     expect(url.searchParams.get('scope')).toBe('openid profile email');
+    expect(url.searchParams.get('resource')).toBe('urn:lec:platform');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('state')).toBe(result.transaction.state);
     expect(url.searchParams.get('nonce')).toBe(result.transaction.nonce);
@@ -90,21 +91,27 @@ describe('LecSSO OIDC 浏览器协议', () => {
     expect(result.url).not.toContain('test-client-secret');
   });
 
-  it('Desktop access token 仅经同源 userinfo 换取稳定主体', async () => {
-    agent
-      .get('https://sso.example.test')
-      .intercept({
-        path: '/oidc/userinfo',
-        headers: { authorization: 'Bearer desktop-access-token' },
-      })
-      .reply(200, {
-        sub: 'desktop-subject',
-        email: 'desktop@example.test',
-        email_verified: true,
-        name: 'Desktop User',
-      });
+  it('Desktop API access token 通过 JWKS 验签，不调用 userinfo', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    agent.get('https://sso.example.test').intercept({ path: '/oidc/certs' }).reply(
+      200,
+      { keys: [jwk] },
+      { headers: { 'content-type': 'application/json' } },
+    );
     await expect(
-      client.identityFromAccessToken('desktop-access-token'),
+      client.identityFromAccessToken(
+        signedToken({
+          iss: issuer,
+          sub: 'desktop-subject',
+          aud: 'urn:lec:platform',
+          exp: now + 300,
+          iat: now,
+          typ: 'Bearer',
+          email: 'desktop@example.test',
+          email_verified: true,
+          name: 'Desktop User',
+        }),
+      ),
     ).resolves.toEqual({
       issuer,
       subject: 'desktop-subject',

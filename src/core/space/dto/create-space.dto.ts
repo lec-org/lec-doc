@@ -1,4 +1,5 @@
 import {
+  IsIn,
   IsOptional,
   IsString,
   Matches,
@@ -8,6 +9,10 @@ import {
 import {Transform, TransformFnParams} from "class-transformer";
 
 export class CreateSpaceDto {
+  @IsOptional()
+  @IsIn(['personal', 'team'])
+  kind?: 'personal' | 'team';
+
   @MinLength(2)
   @MaxLength(100)
   @IsString()

@@ -122,6 +122,7 @@ export class FavoriteRepo {
         'favorites.id',
         'favorites.type',
         'favorites.pageId',
+        'favorites.spaceId',
         'favorites.workspaceId',
       ])
       .where('favorites.userId', '=', userId)

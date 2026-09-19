@@ -73,6 +73,18 @@ export class FavoriteService {
         allowed = candidates.filter((favorite) =>
           accessible.has(favorite.entityId),
         );
+      } else if (type === FavoriteType.SPACE) {
+        const coreAllowed = await this.lecAuthorization.filterSpaces(
+          candidates.map((favorite) => ({
+            id: favorite.entityId,
+            workspaceId: favorite.workspaceId,
+          })),
+          user,
+        );
+        const accessible = new Set(coreAllowed.map((space) => space.id));
+        allowed = candidates.filter((favorite) =>
+          accessible.has(favorite.entityId),
+        );
       }
       authorized.push(...allowed);
 
@@ -211,10 +223,26 @@ export class FavoriteService {
           userId: user.id,
         });
       const accessible = new Set(accessibleIds);
+      const spaceFavorites = candidates.filter(
+        (favorite): favorite is typeof favorite & { spaceId: string } =>
+          favorite.type === FavoriteType.SPACE && !!favorite.spaceId,
+      );
+      const coreAllowedSpaces = spaceFavorites.length
+        ? await this.lecAuthorization.filterSpaces(
+            spaceFavorites.map((favorite) => ({
+              id: favorite.spaceId,
+              workspaceId: favorite.workspaceId,
+            })),
+            user,
+          )
+        : [];
+      const accessibleSpaces = new Set(coreAllowedSpaces.map((space) => space.id));
       const allowed = candidates.filter(
         (favorite) =>
-          favorite.type !== FavoriteType.PAGE ||
-          (favorite.pageId && accessible.has(favorite.pageId)),
+          (favorite.type !== FavoriteType.PAGE ||
+            (favorite.pageId && accessible.has(favorite.pageId))) &&
+          (favorite.type !== FavoriteType.SPACE ||
+            (favorite.spaceId && accessibleSpaces.has(favorite.spaceId))),
       );
       authorized = backwards
         ? [...allowed, ...authorized]

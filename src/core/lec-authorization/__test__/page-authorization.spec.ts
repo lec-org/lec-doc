@@ -16,7 +16,10 @@ const user = { id: 'user', workspaceId: 'workspace' } as any;
 describe('页面共享授权入口', () => {
   const policy = { authorize: jest.fn() };
   const identities = { findByUserId: jest.fn() };
-  const permissions = { canUserEditPage: jest.fn() };
+  const permissions = {
+    canUserEditPage: jest.fn(),
+    findActiveLecGrant: jest.fn(),
+  };
   const space = { createForUser: jest.fn() };
   const spaces = { findById: jest.fn() };
   let authorization: LecAuthorizationService;
@@ -32,6 +35,7 @@ describe('页面共享授权入口', () => {
       canAccess: true,
       canEdit: true,
     });
+    permissions.findActiveLecGrant.mockResolvedValue(undefined);
     space.createForUser.mockResolvedValue({ can: () => true });
     spaces.findById.mockResolvedValue({
       settings: { comments: { allowViewerComments: true } },
@@ -69,6 +73,16 @@ describe('页面共享授权入口', () => {
       canEdit: false,
       hasRestriction: false,
     });
+  });
+  it('页面级 grant 不要求加入所属空间', async () => {
+    policy.authorize.mockResolvedValue([{ allowed: true }, { allowed: false }]);
+    permissions.findActiveLecGrant.mockResolvedValue({ grantId: 'grant' });
+    space.createForUser.mockRejectedValue(new ForbiddenException());
+
+    await expect(
+      access.validateCanViewWithPermissions(page, user),
+    ).resolves.toEqual({ canEdit: false, hasRestriction: false });
+    expect(space.createForUser).toHaveBeenCalledWith(user, page.spaceId);
   });
   it('COMMENT deny 不进入 reader comment 回退', async () => {
     policy.authorize.mockResolvedValue([{ allowed: false }]);

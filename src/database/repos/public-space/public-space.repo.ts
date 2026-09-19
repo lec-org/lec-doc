@@ -178,6 +178,7 @@ export class PublicSpaceRepo {
       .where('publicSpaces.workspaceId', '=', workspaceId)
       .where('publicSpaces.enabled', '=', true)
       .where('spaces.deletedAt', 'is', null)
+      .where('spaces.isPersonal', '=', false)
       .orderBy('spaces.name', 'asc')
       .execute();
   }
